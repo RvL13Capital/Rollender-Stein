@@ -27,3 +27,4 @@ uv run pytest
 - `tests/` — pytest tests
 - `notebooks/` — research notebooks (gitignored output, kept structure)
 - `data/` — local data cache (gitignored)
+# Rollender-Stein
