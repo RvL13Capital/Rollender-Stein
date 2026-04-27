@@ -11,7 +11,9 @@ from rollender_stein.numeraires.gold import (
     SERIES_IDS,
     SOURCE_FRED,
     SOURCE_YAHOO,
+    XAU_SERIES_ID,
     assemble_panel,
+    build_n_gold,
     fit_gold_model,
 )
 
@@ -188,3 +190,97 @@ def test_assemble_panel_columns_are_short_names_not_series_ids(gold_con) -> None
     for sid in SERIES_IDS.values():
         if sid not in {"XAU", "TIPS", "DXY", "VIX"}:
             assert sid not in panel.columns
+
+
+# ----- build_n_gold (post-patch-06: raw XAU, not Kalman) -----------------------
+
+
+def test_build_n_gold_anchors_at_t0_exactly_when_xau_present(gold_con) -> None:
+    """If XAU has a release on or before T0, N_Gold(T0) = 100.0 exact."""
+    dates = pd.bdate_range("1999-12-20", "2000-02-15")
+    values = [280.0 + i * 0.5 for i in range(len(dates))]
+    _seed_daily(gold_con, XAU_SERIES_ID, SOURCE_YAHOO, dates, values)
+
+    n_gold = build_n_gold(gold_con, end=pd.Timestamp("2000-02-15"))
+
+    assert n_gold.loc[T0_DATE] == pytest.approx(100.0, abs=1e-12)
+    # Names and shape sanity
+    assert n_gold.name == "N_Gold"
+    # Following days move proportionally
+    next_day = pd.Timestamp("2000-01-04")
+    expected = (values[dates.searchsorted(next_day)] / values[dates.searchsorted(T0_DATE)]) * 100.0
+    assert n_gold.loc[next_day] == pytest.approx(expected, rel=1e-9)
+
+
+def test_build_n_gold_anchors_at_first_valid_when_t0_uncovered(gold_con) -> None:
+    """If XAU starts AFTER T0 (real-world case for GC=F at 2000-08-30),
+    N_Gold anchors at the first available date instead. Pre-anchor dates are NaN."""
+    # Mirror the real-world gap: XAU starts 2000-08-30, T0 is 2000-01-03.
+    dates = pd.bdate_range("2000-08-30", "2000-12-31")
+    values = [280.0 + i * 0.1 for i in range(len(dates))]
+    _seed_daily(gold_con, XAU_SERIES_ID, SOURCE_YAHOO, dates, values)
+
+    n_gold = build_n_gold(gold_con, end=pd.Timestamp("2000-12-31"))
+
+    # T0 has no XAU value → NaN
+    assert pd.isna(n_gold.loc[T0_DATE])
+    # First-valid date anchors at 100.0
+    first_xau_date = pd.Timestamp("2000-08-30")
+    assert n_gold.loc[first_xau_date] == pytest.approx(100.0, abs=1e-12)
+
+
+def test_build_n_gold_raises_when_xau_not_ingested(gold_con) -> None:
+    with pytest.raises(RuntimeError, match=XAU_SERIES_ID):
+        build_n_gold(gold_con, end=pd.Timestamp("2000-12-31"))
+
+
+def test_build_n_gold_does_not_use_kalman(gold_con) -> None:
+    """Patch-06 invariant: build_n_gold reads ONLY the XAU series.
+    Even if TIPS/DXY/VIX are absent, build_n_gold must still work."""
+    dates = pd.bdate_range("1999-12-20", "2000-02-15")
+    _seed_daily(gold_con, XAU_SERIES_ID, SOURCE_YAHOO, dates, [280.0] * len(dates))
+    # Deliberately do NOT seed TIPS/DXY/VIX
+    n_gold = build_n_gold(gold_con, end=pd.Timestamp("2000-02-15"))
+    # If Kalman was being run, it would raise from assemble_panel because
+    # TIPS/DXY/VIX aren't seeded. The fact that we get a usable Series
+    # confirms build_n_gold uses raw XAU only.
+    assert n_gold.notna().any()
+    assert n_gold.loc[T0_DATE] == pytest.approx(100.0, abs=1e-12)
+
+
+def test_build_n_gold_locf_uses_release_date(gold_con) -> None:
+    """LOCF: a release dated 2000-01-03 must NOT be visible on 2000-01-02."""
+    # Seed three releases: 2000-01-03, 2000-01-04, 2000-01-05.
+    dates = pd.to_datetime(["2000-01-03", "2000-01-04", "2000-01-05"])
+    _seed_daily(gold_con, XAU_SERIES_ID, SOURCE_YAHOO, dates, [280.0, 285.0, 290.0])
+
+    n_gold = build_n_gold(gold_con, end=pd.Timestamp("2000-01-15"))
+    # 2000-01-03 is the first release → first non-NaN
+    pre_t0 = pd.Timestamp("1999-12-31")
+    if pre_t0 in n_gold.index:
+        assert pd.isna(n_gold.loc[pre_t0])
+    assert n_gold.loc[pd.Timestamp("2000-01-03")] == pytest.approx(100.0, abs=1e-12)
+    expected_jan04 = 285.0 / 280.0 * 100.0
+    assert n_gold.loc[pd.Timestamp("2000-01-04")] == pytest.approx(expected_jan04, rel=1e-9)
+
+
+def test_kalman_remains_independent_of_build_n_gold(gold_con) -> None:
+    """The diagnostic Kalman fit must still work even though it no longer
+    drives N_Gold. This guards the Phase 4.5 demotion: fit_gold_model and
+    its outputs are preserved exactly."""
+    dates = pd.bdate_range("2003-01-02", "2003-09-30")
+    n = len(dates)
+    # Seed all four series so the Kalman has a clean panel.
+    _seed_daily(gold_con, SERIES_IDS["XAU"],  SOURCE_YAHOO, dates, [350.0 + i for i in range(n)])
+    _seed_daily(gold_con, SERIES_IDS["TIPS"], SOURCE_FRED,  dates, [2.0]   * n)
+    _seed_daily(gold_con, SERIES_IDS["DXY"],  SOURCE_FRED,  dates, [100.0] * n)
+    _seed_daily(gold_con, SERIES_IDS["VIX"],  SOURCE_FRED,  dates, [20.0]  * n)
+
+    panel = assemble_panel(gold_con, end=pd.Timestamp("2003-09-30"))
+    fit = fit_gold_model(panel)
+    # Cleaned panel covers NYSE trading days in 2003-01-02..2003-09-30. The exact
+    # row count differs from `n` (pandas bdate_range vs NYSE) but must be > 0.
+    assert len(fit.filtered_state) > 100
+    assert fit.results is not None
+    # Filtered state index falls within the cleaned panel range.
+    assert fit.filtered_state.index.min() >= pd.Timestamp("2003-01-02")

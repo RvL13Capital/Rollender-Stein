@@ -1,30 +1,40 @@
-"""N_Gold — the Filtered Core Gold standard.
+"""N_Gold — the gold-price standard.
 
-Phase 4 of the AVE spec. We orthogonalize the daily XAU/USD level (London PM
-fix) against three control variables — the 10Y TIPS real yield, the broad-USD
-Major-Currencies index, and the CBOE VIX — by fitting a local-level
-state-space model and extracting the FILTERED state. Smoothing is forbidden
-(it would leak future observations into past state estimates).
+Phase 4 of the AVE spec. **Methodology revised after audit (patch 06, Option C).**
 
-Model:
+N_Gold is the daily gold spot price (yfinance ``GC=F`` continuous front-month
+futures used as a spot proxy), normalized to 100 at the first available date.
+The Kalman state-space model that previously drove ``N_Gold`` has been demoted
+to a **diagnostic artifact** (Phase 4.5) — its filtered state, residuals, and
+MLE parameters are still computed and persisted under ``data/derived/kalman/``,
+but they no longer participate in any numéraire calculation.
 
-    y_t = mu_t + beta . x_t + eps_t,    eps_t ~ N(0, sigma_eps^2)
-    mu_t = mu_{t-1} + eta_t,            eta_t ~ N(0, sigma_eta^2)
+Why the change: the audit's M-13 finding showed the Kalman "orthogonalization"
+of XAU against (TIPS, DXY, VIX) is empirically degenerate — on real GC=F data
+the filtered state μ_t correlates 0.97 with raw XAU, and the variance
+decomposition gives Var(μ_t) ≈ 1.43·Var(y) with negative covariance against
+the regression. The "filtered core gold" was mostly a smoothed XAU plus a
+complementary regression-cancelling correction; the structural decomposition
+story has no empirical support on this data shape. Replacing it with raw XAU
+restores dimensional homogeneity at the price of admitting that Phase 4 is
+about gold, not "core gold".
 
-with x_t = (TIPS_t, DXY_t, VIX_t). mu_t is "true core gold" — the latent
-monetary signal once we strip out real-yield, currency, and risk-aversion
-noise.
+Anchor caveat: the only free daily gold series with multi-decade depth is
+yfinance ``GC=F``, which begins 2000-08-30. ``N_Gold`` is anchored on that
+first available date = 100.0, leaving an 8-month gap (2000-01-03 → 2000-08-29)
+where ``N_Gold`` is NaN. This is a 6x-improvement over the previous
+2006-anchored Kalman pipeline but does not fully restore the T0 invariant.
+The audit's "C-1 dimensional asymmetry" is therefore reduced, not eliminated.
 
-Anchoring caveat: DFII10 (TIPS) starts 2003-01-02. Rows with NaN exog are
-dropped before fitting, so the Kalman recursion runs on 2003-onward only.
-N_Gold is therefore normalized to 100 at the FIRST available filtered date
-(≈ 2003-01-02), NOT at T0. Pre-2003 values are NaN. This is the consequence
-of the "accept the gap" decision in the spec resolution.
+The diagnostic Kalman model still requires the full panel (XAU/TIPS/DXY/VIX)
+and is unchanged from the spec — its outputs are useful for regime-shift
+detection (the ``recent_to_alltime_std_ratio`` in ``patterns.py``).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import cast
 
 import duckdb
 import numpy as np
@@ -32,23 +42,21 @@ import pandas as pd
 import statsmodels.api as sm
 
 from rollender_stein.bitemporal import insert_macro_releases, latest_release_stream
-from rollender_stein.calendar import master_calendar
+from rollender_stein.calendar import T0_DATE, master_calendar
 from rollender_stein.io.fred import fetch_fred_observations
 from rollender_stein.io.yahoo import fetch_yahoo_history
 from rollender_stein.locf import forward_fill_to_calendar
 
-# Heterogeneous sources by necessity:
-#   XAU  — yfinance GC=F (gold front-month futures as spot proxy; LBMA was
-#          removed from FRED in 2017 and free LBMA feeds no longer exist).
-#   TIPS — FRED DFII10 (live endpoint; daily, 2003-onward).
-#   DXY  — FRED DTWEXBGS (live endpoint; daily, 2006-onward; replaces the
-#          discontinued DTWEXM).
-#   VIX  — FRED VIXCLS (live endpoint; daily, 1990-onward).
-#
-# Effective Kalman fit window is bottlenecked by DXY at 2006-01-02. N_Gold
-# is anchored at the first available date (≈ 2006-01-02), NOT at T0.
+# The XAU series id used directly to build N_Gold.
+XAU_SERIES_ID = "GC=F"
+
+# Heterogeneous sources for the Kalman *diagnostic*:
+#   XAU  — yfinance GC=F (gold front-month futures, also the basis of N_Gold)
+#   TIPS — FRED DFII10 (live endpoint; daily, 2003-onward)
+#   DXY  — FRED DTWEXBGS (live endpoint; daily, 2006-onward)
+#   VIX  — FRED VIXCLS (live endpoint; daily, 1990-onward)
 SERIES_IDS: dict[str, str] = {
-    "XAU": "GC=F",
+    "XAU": XAU_SERIES_ID,
     "TIPS": "DFII10",
     "DXY": "DTWEXBGS",
     "VIX": "VIXCLS",
@@ -64,19 +72,17 @@ def ingest_gold_inputs(
 ) -> dict[str, int]:
     """Pull all four daily inputs into the bitemporal store.
 
-    XAU comes from yfinance; TIPS/DXY/VIX come from FRED's live endpoint.
-    The bitemporal store distinguishes sources via the ``source`` column so
-    we can swap in a paid LBMA feed later without losing audit history.
+    XAU comes from yfinance and is the **direct basis of N_Gold** post-patch-06.
+    TIPS/DXY/VIX come from FRED's live endpoint and feed the Kalman diagnostic
+    only — they no longer affect the numéraire.
     """
     counts: dict[str, int] = {}
 
-    # FRED inputs
     for short in ("TIPS", "DXY", "VIX"):
         sid = SERIES_IDS[short]
         rows = fetch_fred_observations(sid, fred_api_key)
         counts[short] = insert_macro_releases(con, sid, rows, source=SOURCE_FRED)
 
-    # Yahoo input (gold)
     rows = fetch_yahoo_history(SERIES_IDS["XAU"])
     counts["XAU"] = insert_macro_releases(
         con, SERIES_IDS["XAU"], rows, source=SOURCE_YAHOO
@@ -89,7 +95,11 @@ def assemble_panel(
     *,
     end: pd.Timestamp | None = None,
 ) -> pd.DataFrame:
-    """Build the 4-column daily panel (XAU, TIPS, DXY, VIX) on the master calendar."""
+    """Build the 4-column daily panel (XAU, TIPS, DXY, VIX) on the master calendar.
+
+    This is the input to the Phase 4.5 Kalman *diagnostic*. It does not feed
+    N_Gold directly anymore (post-patch-06).
+    """
     cal = master_calendar(end=end)
     panel = pd.DataFrame(index=cal)
     for short, sid in SERIES_IDS.items():
@@ -106,11 +116,11 @@ def assemble_panel(
 
 @dataclass(frozen=True)
 class GoldFit:
-    """Output of the Kalman gold model, ready for downstream Phase 5 use."""
+    """Output of the Phase 4.5 Kalman *diagnostic*. Not used in any numéraire."""
 
     results: sm.tsa.statespace.mlemodel.MLEResults
     panel_clean: pd.DataFrame
-    filtered_state: pd.Series  # mu_t — the latent "true core gold" level
+    filtered_state: pd.Series  # mu_t — the latent "smoothed-XAU" level (not orthogonal)
 
 
 def fit_gold_model(
@@ -121,9 +131,13 @@ def fit_gold_model(
     """Fit the local-level + linear-regression model on the clean panel.
 
     Drops rows with any NaN across {XAU, TIPS, DXY, VIX}. The Kalman recursion
-    runs on the surviving rows only (in practice 2003-onward). Returns the
-    statsmodels results, the cleaned panel actually fed to the model, and the
-    filtered state series indexed by the cleaned panel's dates.
+    runs on the surviving rows only (in practice 2006-onward, bottlenecked by
+    DXY).
+
+    **Diagnostic-only post-patch-06.** The fit is preserved for regime-shift
+    detection via the residual-variance ratio (see ``patterns.py``). The
+    filtered state μ_t is NOT a "core gold" component — empirically it tracks
+    raw XAU at r ≈ 0.97 and is non-orthogonal to the regression term.
     """
     required = {"XAU", *EXOG_COLS}
     missing = required - set(panel.columns)
@@ -154,17 +168,41 @@ def build_n_gold(
     *,
     end: pd.Timestamp | None = None,
 ) -> pd.Series:
-    """Build the daily N_Gold index. Anchors at the first filtered date = 100.0.
+    """Build the daily N_Gold index from raw XAU (GC=F).
 
-    Reindexed onto the full master calendar; values pre-2003 (where TIPS is
-    unobserved and the Kalman recursion has not started) are NaN.
+    Pipeline:
+      1. Read XAU release stream from the bitemporal store (release_date == reference_date
+         for daily yfinance data — see ``io/yahoo.py``).
+      2. LOCF onto the master NYSE calendar.
+      3. Anchor at T0 if XAU has a value there; otherwise at the first valid date
+         (typically 2000-08-30, GC=F's start).
+
+    Returns a Series indexed by the master calendar. Values before XAU's first
+    available date are NaN — patch 06 reduces but does not eliminate the
+    pre-anchor gap originally identified as audit finding C-1.
     """
-    panel = assemble_panel(con, end=end)
-    fit = fit_gold_model(panel)
+    stream = latest_release_stream(con, XAU_SERIES_ID)
+    if stream.empty:
+        raise RuntimeError(
+            f"no rows in macro_release for {XAU_SERIES_ID}; run ingest_gold_inputs() first",
+        )
 
-    anchor = float(fit.filtered_state.iloc[0])
+    stream = stream.rename(columns={"value": "xau"})
+    cal = master_calendar(end=end)
+    daily = forward_fill_to_calendar(stream, cal, value_cols=["xau"])
+
+    # Anchor: prefer T0; fall back to first non-NaN date.
+    xau_series = daily["xau"]
+    if T0_DATE in xau_series.index and pd.notna(xau_series.loc[T0_DATE]):
+        anchor = float(cast(float, xau_series.loc[T0_DATE]))
+    else:
+        first_valid = xau_series.first_valid_index()
+        if first_valid is None:
+            raise RuntimeError("XAU series has no non-NaN values")
+        anchor = float(cast(float, xau_series.loc[first_valid]))
+
     if not np.isfinite(anchor) or anchor == 0:
         raise RuntimeError(f"N_Gold anchor invalid: {anchor}")
 
-    n_gold_clean = (fit.filtered_state / anchor) * 100.0
-    return n_gold_clean.reindex(panel.index).rename("N_Gold")
+    n_gold = (daily["xau"] / anchor) * 100.0
+    return n_gold.rename("N_Gold")
