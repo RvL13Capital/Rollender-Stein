@@ -75,14 +75,17 @@ def _scene_layout(x: str, y: str, z: str, df: pd.DataFrame) -> dict[str, Any]:
 
 
 def _hovertemplate(x: str, y: str, z: str) -> str:
+    # Audit B-Minor / patch 04: the values on each axis are USD (T0-deflated),
+    # not multipliers. Format with $ prefix and no "x" suffix to match.
+    # customdata[1] (asset_in_time) is also a USD value — same convention.
     return (
         "<b>Date:</b> %{text}<br>"
         "<b>Nominal Fiat Price:</b> $%{customdata[0]:,.2f}<br>"
-        "<b>Time Multiplier:</b> %{customdata[1]:.2f}x<br>"
+        "<b>Time-deflated USD:</b> $%{customdata[1]:,.2f}<br>"
         "<hr>"
-        f"{x}: %{{x:.2f}}x<br>"
-        f"{y}: %{{y:.2f}}x<br>"
-        f"{z}: %{{z:.2f}}x<extra></extra>"
+        f"{x}: $%{{x:,.2f}}<br>"
+        f"{y}: $%{{y:,.2f}}<br>"
+        f"{z}: $%{{z:,.2f}}<extra></extra>"
     )
 
 

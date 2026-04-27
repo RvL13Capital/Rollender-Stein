@@ -1,8 +1,15 @@
 """Master NYSE business calendar anchored to T0.
 
-Phase 1.1 of the AVE spec. T0 is the Genesis Timestamp:
-the first NYSE close of the millennium. Every numéraire and
-asset index is normalized to exactly 100.00 at this moment.
+Phase 1.1 of the AVE spec. T0 is the Genesis Timestamp: the first NYSE
+trading day of the millennium (Monday, January 3, 2000). Every numéraire
+is normalized to exactly 100.00 on this date.
+
+Note on the literal ``T0`` constant below: the value ``2000-01-03 17:00:00 UTC``
+corresponds to noon US Eastern (12:00 EST), not the actual NYSE close
+which is 16:00 EST = 21:00 UTC. The audit (m-1) flagged this. Downstream
+code uses only ``T0_DATE`` (the date), so the time-of-day mismatch is
+harmless. The naïve date is the load-bearing constant; the timestamped
+``T0`` is left intact to avoid touching the public API.
 """
 
 from __future__ import annotations
@@ -10,8 +17,12 @@ from __future__ import annotations
 import pandas as pd
 import pandas_market_calendars as mcal
 
-T0: pd.Timestamp = pd.Timestamp("2000-01-03 17:00:00", tz="UTC")
+# T0_DATE (date-only) is what every downstream caller actually uses.
 T0_DATE: pd.Timestamp = pd.Timestamp("2000-01-03")
+# T0 (timestamped) is preserved for API compatibility but is only the date
+# part that matters; the 17:00 UTC offset is noon ET, not NYSE close —
+# documented above. Do not rely on the time component.
+T0: pd.Timestamp = pd.Timestamp("2000-01-03 17:00:00", tz="UTC")
 
 _NYSE = mcal.get_calendar("NYSE")
 
