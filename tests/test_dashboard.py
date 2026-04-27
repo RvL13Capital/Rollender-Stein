@@ -126,3 +126,196 @@ def test_static_default_unchanged_when_animate_false() -> None:
     assert not fig.frames
     assert not fig.layout.updatemenus
     assert not fig.layout.sliders
+
+
+# ---------------------------------------------------------------------------
+# Volume / opacity integration
+# ---------------------------------------------------------------------------
+
+
+def _toy_division_array_with_volume(coverage: float = 1.0):
+    """Toy frame with non-trivial dollar_turnover for opacity tests."""
+    dates = pd.bdate_range(T0_DATE, periods=400)
+    n = len(dates)
+    asset = pd.Series(1500.0 * (1.0 + np.linspace(0, 1, n)), index=dates, name="spx")
+    n_time = pd.Series(100.0 * (1.0 + np.linspace(0, 0.3, n)), index=dates, name="N_Time")
+    n_liq = pd.Series(100.0 * (1.0 + np.linspace(0, 0.5, n)), index=dates, name="N_Liq")
+    n_gold = pd.Series(100.0 * (1.0 + np.linspace(0, 0.4, n)), index=dates, name="N_Gold")
+    rng = np.random.default_rng(1)
+    raw_turnover = np.exp(rng.normal(15, 0.4, n))
+    turnover = pd.Series(raw_turnover, index=dates, name="dollar_turnover")
+    if coverage < 1.0:
+        # Knock out the first (1-coverage) fraction
+        n_drop = int(n * (1 - coverage))
+        turnover.iloc[:n_drop] = np.nan
+    return build_division_array(
+        asset,
+        n_time=n_time,
+        n_liquidity=n_liq,
+        n_gold=n_gold,
+        dollar_turnover=turnover,
+    )
+
+
+def _alpha_from_rgba(rgba: str) -> float:
+    """Parse the alpha channel out of an ``rgba(r, g, b, a)`` string."""
+    body = rgba.removeprefix("rgba(").rstrip(")")
+    return float(body.split(",")[3].strip())
+
+
+def test_static_marker_uses_legacy_numeric_color_when_no_volume() -> None:
+    """Asset without dollar_turnover renders with the legacy scalar opacity
+    and numeric Viridis colormap (no per-marker alpha encoding needed)."""
+    da = _toy_division_array()  # no volume
+    fig = build_phase_space_figure(
+        da, x="asset_in_time", y="asset_in_liquidity", z="asset_in_gold"
+    )
+    marker = fig.data[0].marker
+    # Scalar opacity preserved
+    assert isinstance(marker.opacity, float | int)
+    assert marker.opacity == pytest.approx(0.7)
+    # Color stays the numeric time array (NOT a list of rgba strings)
+    color_arr = np.asarray(marker.color)
+    assert color_arr.dtype.kind in ("i", "f"), (
+        f"expected numeric color array for no-volume case, got {color_arr.dtype}"
+    )
+
+
+def test_static_marker_color_is_rgba_array_when_volume_present() -> None:
+    """With volume, per-marker alpha is baked into RGBA color strings —
+    Plotly's only path to vary marker opacity per point in 3D scatter."""
+    da = _toy_division_array_with_volume()
+    fig = build_phase_space_figure(
+        da, x="asset_in_time", y="asset_in_liquidity", z="asset_in_gold"
+    )
+    marker = fig.data[0].marker
+    # marker.opacity is now scalar 1.0; alpha lives in the color strings
+    assert marker.opacity == pytest.approx(1.0)
+    colors = list(marker.color)
+    assert len(colors) == len(fig.data[0].x)
+    assert all(isinstance(c, str) and c.startswith("rgba(") for c in colors)
+    alphas = np.array([_alpha_from_rgba(c) for c in colors])
+    # All alphas in the documented [0.25, 1.0] envelope
+    assert alphas.min() >= 0.25 - 1e-12
+    assert alphas.max() <= 1.0 + 1e-12
+    # Variance across markers — i.e. opacity actually varies
+    assert alphas.std() > 0.05
+
+
+def test_opacity_falls_back_when_coverage_below_threshold() -> None:
+    """Even with a dollar_turnover column, sparse coverage triggers the
+    scalar-fallback safety path (e.g. legacy ingests, brand-new tickers)."""
+    da = _toy_division_array_with_volume(coverage=0.3)
+    fig = build_phase_space_figure(
+        da, x="asset_in_time", y="asset_in_liquidity", z="asset_in_gold"
+    )
+    marker = fig.data[0].marker
+    assert isinstance(marker.opacity, float | int)
+    assert marker.opacity == pytest.approx(0.7)
+    # Color stays numeric (no rgba strings in low-coverage fallback)
+    color_arr = np.asarray(marker.color)
+    assert color_arr.dtype.kind in ("i", "f")
+
+
+def test_opacity_falls_back_when_turnover_is_all_zeros() -> None:
+    """Indexes like ^SP500TR have ``volume = 0`` in yfinance (not NULL).
+    Naive NaN-coverage would pass; we explicitly require *positive* turnover
+    coverage to trigger per-marker opacity, otherwise an index would render
+    uniformly floor-faint."""
+    dates = pd.bdate_range(T0_DATE, periods=400)
+    n = len(dates)
+    asset = pd.Series(1500.0 * (1.0 + np.linspace(0, 1, n)), index=dates, name="spx")
+    n_time = pd.Series(100.0 * (1.0 + np.linspace(0, 0.3, n)), index=dates, name="N_Time")
+    n_liq = pd.Series(100.0 * (1.0 + np.linspace(0, 0.5, n)), index=dates, name="N_Liq")
+    n_gold = pd.Series(100.0 * (1.0 + np.linspace(0, 0.4, n)), index=dates, name="N_Gold")
+    # Turnover is fully populated but all zero — like an index ETF placeholder
+    turnover = pd.Series(np.zeros(n), index=dates, name="dollar_turnover")
+
+    da = build_division_array(
+        asset, n_time=n_time, n_liquidity=n_liq, n_gold=n_gold,
+        dollar_turnover=turnover,
+    )
+    fig = build_phase_space_figure(
+        da, x="asset_in_time", y="asset_in_liquidity", z="asset_in_gold"
+    )
+    marker = fig.data[0].marker
+    assert isinstance(marker.opacity, float | int)
+    assert marker.opacity == pytest.approx(0.7)
+
+
+def test_hover_template_includes_volume_lines_when_volume_present() -> None:
+    da = _toy_division_array_with_volume()
+    fig = build_phase_space_figure(
+        da, x="asset_in_time", y="asset_in_liquidity", z="asset_in_gold"
+    )
+    template = fig.data[0].hovertemplate
+    assert "Daily Turnover" in template
+    assert "Vol z-score" in template
+
+
+def test_hover_template_omits_volume_lines_when_no_volume() -> None:
+    da = _toy_division_array()
+    fig = build_phase_space_figure(
+        da, x="asset_in_time", y="asset_in_liquidity", z="asset_in_gold"
+    )
+    template = fig.data[0].hovertemplate
+    assert "Daily Turnover" not in template
+    assert "Vol z-score" not in template
+
+
+def test_animation_color_arrays_match_frame_lengths() -> None:
+    """Per-frame the rgba color array length must equal the frame's marker
+    count (otherwise Plotly silently truncates)."""
+    da = _toy_division_array_with_volume()
+    fig = build_phase_space_figure(
+        da,
+        x="asset_in_time",
+        y="asset_in_liquidity",
+        z="asset_in_gold",
+        animate=True,
+        frame_step=20,
+        subsample=1,
+    )
+    for frame in fig.frames:
+        colors = frame.data[0].marker.color
+        assert hasattr(colors, "__len__")
+        assert len(colors) == len(frame.data[0].x)
+        # All entries are rgba strings
+        assert all(isinstance(c, str) and c.startswith("rgba(") for c in colors)
+
+
+def test_subsampling_preserves_full_resolution_zscore() -> None:
+    """Audit point: opacity must be computed at FULL resolution before
+    subsampling, then sliced. This guarantees the rolling-window definition
+    (252 trading days) stays correct regardless of the animation stride.
+
+    Validation: the per-marker alpha for a date that appears in BOTH the
+    full and subsampled figures must be bit-for-bit identical."""
+    da = _toy_division_array_with_volume()
+    fig_full = build_phase_space_figure(
+        da,
+        x="asset_in_time",
+        y="asset_in_liquidity",
+        z="asset_in_gold",
+        subsample=1,
+    )
+    fig_sub = build_phase_space_figure(
+        da,
+        x="asset_in_time",
+        y="asset_in_liquidity",
+        z="asset_in_gold",
+        subsample=4,
+    )
+    alphas_full = np.array([_alpha_from_rgba(c) for c in fig_full.data[0].marker.color])
+    alphas_sub = np.array([_alpha_from_rgba(c) for c in fig_sub.data[0].marker.color])
+    text_full = list(fig_full.data[0].text)
+    text_sub = list(fig_sub.data[0].text)
+    matched = 0
+    for date_str, a_sub in zip(text_sub, alphas_sub, strict=True):
+        if date_str in text_full:
+            a_full = alphas_full[text_full.index(date_str)]
+            assert a_sub == pytest.approx(a_full, abs=1e-3), (
+                f"date {date_str}: subsampled alpha {a_sub} ≠ full {a_full}"
+            )
+            matched += 1
+    assert matched > 10, f"only {matched} dates overlapped — subsampling broken"

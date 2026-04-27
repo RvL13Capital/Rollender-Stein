@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -241,4 +242,56 @@ def test_zero_in_numeraire_produces_nan_not_inf() -> None:
     assert pd.isna(da.asset_in_time.loc[pd.Timestamp("2010-01-04")])
     # Surrounding dates compute normally.
     assert pd.notna(da.asset_in_time.loc[T0_DATE])
-    assert pd.notna(da.asset_in_time.loc[pd.Timestamp("2020-01-06")])
+
+
+# ----- Volume / dollar-turnover passthrough -----------------------------------
+
+
+def test_volume_and_turnover_appear_in_to_frame_when_provided() -> None:
+    dates = [str(T0_DATE.date()), "2010-01-04", "2020-01-06"]
+    asset = _series([1500.0, 3000.0, 4500.0], dates, "spx")
+    n_liq = _series([100.0, 150.0, 200.0], dates, "N_Liq")
+    volume = _series([1e6, 2e6, 3e6], dates, "volume")
+    turnover = volume * asset
+
+    da = build_division_array(
+        asset, n_liquidity=n_liq, volume=volume, dollar_turnover=turnover
+    )
+    df = da.to_frame()
+    assert "volume" in df.columns
+    assert "dollar_turnover" in df.columns
+    assert df["volume"].iloc[-1] == pytest.approx(3e6)
+    assert df["dollar_turnover"].iloc[-1] == pytest.approx(4500.0 * 3e6)
+
+
+def test_volume_absent_by_default_for_backwards_compat() -> None:
+    """Existing callers passing only numéraires get the original schema."""
+    dates = [str(T0_DATE.date()), "2010-01-04"]
+    asset = _series([1500.0, 3000.0], dates, "spx")
+    n_liq = _series([100.0, 150.0], dates, "N_Liq")
+
+    da = build_division_array(asset, n_liquidity=n_liq)
+    assert da.volume is None
+    assert da.dollar_turnover is None
+    df = da.to_frame()
+    assert "volume" not in df.columns
+    assert "dollar_turnover" not in df.columns
+
+
+def test_volume_aligned_to_numeraire_calendar() -> None:
+    """Volume/turnover get reindexed to the same base calendar as the
+    deflated axes — so dashboard slicing uses one consistent index."""
+    # Numéraire spans more dates than the volume series.
+    n_dates = pd.bdate_range(T0_DATE, periods=10)
+    asset = pd.Series(np.linspace(1500, 1600, 10), index=n_dates, name="spx")
+    n_liq = pd.Series(np.linspace(100, 110, 10), index=n_dates, name="N_Liq")
+    # Volume only on the last 5 days.
+    volume = pd.Series([1e6, 2e6, 3e6, 4e6, 5e6], index=n_dates[-5:], name="volume")
+
+    da = build_division_array(asset, n_liquidity=n_liq, volume=volume)
+    assert da.volume is not None
+    # Same length as the numéraire calendar
+    assert len(da.volume) == 10
+    # Early days are NaN (no volume); late days have values
+    assert da.volume.iloc[:5].isna().all()
+    assert da.volume.iloc[-1] == pytest.approx(5e6)

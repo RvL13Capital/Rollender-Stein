@@ -20,6 +20,7 @@ import plotly.graph_objects as go
 
 from rollender_stein.bitemporal import (
     get_asset_closes,
+    get_asset_volume,
     insert_asset_prices,
 )
 from rollender_stein.dashboard import build_phase_space_figure, save_dashboard_html
@@ -29,6 +30,7 @@ from rollender_stein.numeraires.gold import build_n_gold
 from rollender_stein.numeraires.liquidity import build_n_liq
 from rollender_stein.numeraires.time import build_n_time
 from rollender_stein.valuation import DivisionArray, build_division_array
+from rollender_stein.volume import compute_dollar_turnover
 
 
 def ingest_yahoo_asset(
@@ -100,12 +102,30 @@ def build_pipeline_for_asset(
     n_energy = build_n_energy(con, end=end)
     n_gold = build_n_gold(con, end=end)
 
+    # Volume / dollar-turnover for the dashboard's conviction channel. Use the
+    # RAW close (prefer_adjusted=False) because yfinance retroactively
+    # split-adjusts both Close and Volume in opposite directions; raw_close *
+    # raw_volume cancels splits and yields the historical USD turnover.
+    # adj_close * volume would double-discount the dividend reinvestment.
+    raw_close = get_asset_closes(con, ticker, end=end, prefer_adjusted=False)
+    volume = get_asset_volume(con, ticker, end=end)
+    if volume.empty:
+        # No tradeable volume (typical for indexes like ^SP500TR) — fall through
+        # cleanly; dashboard will use default opacity.
+        turnover: pd.Series | None = None
+        volume_for_array: pd.Series | None = None
+    else:
+        turnover = compute_dollar_turnover(raw_close, volume)
+        volume_for_array = volume
+
     division = build_division_array(
         closes,
         n_time=n_time,
         n_liquidity=n_liq,
         n_gold=n_gold,
         n_energy=n_energy,
+        volume=volume_for_array,
+        dollar_turnover=turnover,
     )
     figure = build_phase_space_figure(
         division,

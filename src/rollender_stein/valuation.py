@@ -48,6 +48,11 @@ class DivisionArray:
     asset_in_liquidity: pd.Series | None
     asset_in_gold: pd.Series | None
     asset_in_energy: pd.Series | None
+    # Optional conviction channel — populated when the asset has volume data
+    # (see rollender_stein.volume). NaN-tolerant; absent for indexes (no
+    # tradeable underlying) and futures (contract-count semantics, not USD).
+    volume: pd.Series | None = None
+    dollar_turnover: pd.Series | None = None
 
     def to_frame(self) -> pd.DataFrame:
         cols: dict[str, pd.Series] = {
@@ -62,6 +67,10 @@ class DivisionArray:
             cols["asset_in_gold"] = self.asset_in_gold
         if self.asset_in_energy is not None:
             cols["asset_in_energy"] = self.asset_in_energy
+        if self.volume is not None:
+            cols["volume"] = self.volume
+        if self.dollar_turnover is not None:
+            cols["dollar_turnover"] = self.dollar_turnover
         return pd.DataFrame(cols)
 
 
@@ -72,6 +81,8 @@ def build_division_array(
     n_liquidity: pd.Series | None = None,
     n_gold: pd.Series | None = None,
     n_energy: pd.Series | None = None,
+    volume: pd.Series | None = None,
+    dollar_turnover: pd.Series | None = None,
     t0_date: pd.Timestamp = T0_DATE,
     t0_invariant_tol: float = DEFAULT_T0_INVARIANT_TOL,
 ) -> DivisionArray:
@@ -169,6 +180,17 @@ def build_division_array(
         out_name = str(num.name) if num.name is not None else "asset_in_X"
         return ratio.rename(out_name)
 
+    # Volume and turnover are aligned to the same base calendar as the
+    # numéraire-deflated axes — no forward-fill, since volume is a flow not a
+    # stock; days without recorded volume stay NaN and surface as floor-opacity
+    # markers in the dashboard.
+    volume_aligned = volume.reindex(base_idx).rename("volume") if volume is not None else None
+    turnover_aligned = (
+        dollar_turnover.reindex(base_idx).rename("dollar_turnover")
+        if dollar_turnover is not None
+        else None
+    )
+
     return DivisionArray(
         nominal_usd=nominal_aligned.rename("nominal_usd"),
         asset_indexed=indexed.rename("asset_indexed"),
@@ -176,4 +198,6 @@ def build_division_array(
         asset_in_liquidity=_ratio(n_liquidity, "n_liquidity"),
         asset_in_gold=_ratio(n_gold, "n_gold"),
         asset_in_energy=_ratio(n_energy, "n_energy"),
+        volume=volume_aligned,
+        dollar_turnover=turnover_aligned,
     )

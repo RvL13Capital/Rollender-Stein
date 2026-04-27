@@ -9,6 +9,7 @@ import pytest
 from rollender_stein.assets import save_asset_dashboard
 from rollender_stein.bitemporal import (
     get_asset_closes,
+    get_asset_volume,
     insert_asset_prices,
     open_db,
 )
@@ -61,6 +62,54 @@ def test_insert_asset_prices_accepts_partial_columns(con) -> None:
     assert n == 2
     closes = get_asset_closes(con, "MIN")
     assert closes.tolist() == [42.0, 43.0]
+
+
+def test_get_asset_volume_round_trip(con) -> None:
+    rows = pd.DataFrame(
+        {
+            "trade_date": pd.to_datetime(["2024-01-02", "2024-01-03", "2024-01-04"]),
+            "close": [101.0, 100.0, 100.5],
+            "volume": [1_000_000, 950_000, 1_100_000],
+        }
+    )
+    insert_asset_prices(con, "TEST", rows, source="UNITTEST")
+    vol = get_asset_volume(con, "TEST")
+    assert list(vol.values) == [1_000_000.0, 950_000.0, 1_100_000.0]
+    assert vol.index[0] == pd.Timestamp("2024-01-02")
+
+
+def test_get_asset_volume_returns_empty_for_index_with_no_volume(con) -> None:
+    """Indexes (^SP500TR etc.) typically have NULL volume — must round-trip
+    cleanly to an empty Series so the dashboard's coverage check fires."""
+    rows = pd.DataFrame(
+        {
+            "trade_date": pd.to_datetime(["2024-01-02", "2024-01-03"]),
+            "close": [4500.0, 4510.0],
+            # volume column omitted → stored as NULL
+        }
+    )
+    insert_asset_prices(con, "INDEX", rows, source="UNITTEST")
+    vol = get_asset_volume(con, "INDEX")
+    assert vol.empty
+    assert vol.dtype == "float64"
+
+
+def test_get_asset_volume_filters_out_null_rows(con) -> None:
+    """Mixed NULL / present rows: only the populated ones come back."""
+    rows = pd.DataFrame(
+        {
+            "trade_date": pd.to_datetime(
+                ["2024-01-02", "2024-01-03", "2024-01-04"]
+            ),
+            "close": [100.0, 101.0, 102.0],
+            "volume": [1_000_000.0, np.nan, 2_000_000.0],
+        }
+    )
+    insert_asset_prices(con, "MIX", rows, source="UNITTEST")
+    vol = get_asset_volume(con, "MIX")
+    assert len(vol) == 2
+    assert vol.index[0] == pd.Timestamp("2024-01-02")
+    assert vol.index[1] == pd.Timestamp("2024-01-04")
 
 
 def test_insert_or_replace_asset_prices(con) -> None:

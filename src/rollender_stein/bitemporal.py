@@ -517,6 +517,50 @@ def get_asset_closes(
     return s
 
 
+def get_asset_volume(
+    con: duckdb.DuckDBPyConnection,
+    series_id: str,
+    *,
+    start: pd.Timestamp | None = None,
+    end: pd.Timestamp | None = None,
+) -> pd.Series:
+    """Read the daily volume series for ``series_id`` indexed by trade_date.
+
+    Returned values are the yfinance ``Volume`` column as stored — share count
+    for stocks/ETFs, contract count for futures (``=F``), coin count for
+    crypto. Rows where ``volume`` is NULL in the DB are dropped from the
+    output (they are not represented as NaN, since "volume not recorded" and
+    "volume = 0" are semantically different and we conservatively assume the
+    former for NULLs in legacy ingests).
+
+    Empty Series if the series has not been ingested or has no recorded
+    volume (e.g. ``^SP500TR`` — the index is not a tradeable instrument).
+    """
+    where = ["series_id = ?"]
+    params: list[object] = [series_id]
+    if start is not None:
+        where.append("trade_date >= ?")
+        params.append(start.date() if hasattr(start, "date") else start)
+    if end is not None:
+        where.append("trade_date <= ?")
+        params.append(end.date() if hasattr(end, "date") else end)
+    sql = f"""
+        SELECT trade_date, volume
+        FROM asset_price
+        WHERE {" AND ".join(where)} AND volume IS NOT NULL
+        ORDER BY trade_date ASC
+    """
+    df = con.execute(sql, params).fetchdf()
+    if df.empty:
+        return pd.Series(name=series_id, dtype="float64")
+    s: pd.Series = pd.Series(
+        df["volume"].to_numpy(),
+        index=pd.DatetimeIndex(df["trade_date"]),
+        name=series_id,
+    )
+    return s
+
+
 def latest_release_stream(
     con: duckdb.DuckDBPyConnection,
     series_id: str,

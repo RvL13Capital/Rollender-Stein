@@ -1,11 +1,18 @@
 """Phase 6 — 3D Phase-Space Attractor dashboard.
 
 Renders the asset's trajectory through the multidimensional valuation space
-defined by the AVE numéraires. The 3D plot uses three of the four ``Asset_in_X``
-arrays as spatial axes; chronological time is encoded in the marker color
-gradient (4th dimension); nominal USD price drives marker size (5th dimension)
-to make the "Fiat Illusion" visually obvious — markers swelling without
-trajectory motion means nominal price growth that buys nothing absolute.
+defined by the AVE numéraires. The plot encodes up to **six** dimensions:
+
+- 3 spatial axes: ``Asset_in_X`` for X ∈ {Energy, Liquidity, Gold, Time}
+- Marker / line color: chronological time (Viridis gradient)
+- Marker size: nominal USD price — lets the "Fiat Illusion" jump out
+  visually (a marker swelling without trajectory motion = nominal growth
+  that buys nothing absolute).
+- Marker opacity: rolling 252-day z-score of dollar turnover, mapped to
+  [0.25, 1.0]. Solid markers = the crowd transacted heavily at this
+  purchasing-power coordinate (real conviction). Faint markers = drift on
+  thin volume. Falls back to a constant 0.7 when the asset has no usable
+  volume (indexes, futures, sparse coverage).
 
 Two render modes:
 - ``animate=False`` (default): static figure showing the full trajectory at once.
@@ -22,8 +29,22 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+from plotly.colors import sample_colorscale
 
 from rollender_stein.valuation import DivisionArray
+from rollender_stein.volume import coverage_ratio, rolling_volume_zscore
+
+# Opacity-encoding constants (volume z-score → marker opacity).
+_OPACITY_FLOOR = 0.25  # below this is invisible to the eye; preserves "drift" markers
+_OPACITY_DEFAULT = 0.7  # used when volume coverage is too sparse to z-score reliably
+_OPACITY_COVERAGE_THRESHOLD = 0.5  # require ≥50% non-NaN turnover to enable per-marker opacity
+# Z-score → opacity mapping: opacity = clip(0.5 + 0.25 * z, floor, 1.0).
+# z = 0 → 0.5 (mid); z = +2 → 1.0 (cap); z ≤ -1 → floor.
+_OPACITY_Z_OFFSET = 0.5
+_OPACITY_Z_SLOPE = 0.25
+# Warm-up rows (where the rolling window has no z-score yet) collapse to floor —
+# treated as "we don't yet know how much conviction this represents."
+_OPACITY_WARMUP_FILL_Z = -2.0
 
 AXIS_LABELS: dict[str, str] = {
     "asset_in_energy": "Physics (Thermodynamic MWh Value)",
@@ -74,14 +95,22 @@ def _scene_layout(x: str, y: str, z: str, df: pd.DataFrame) -> dict[str, Any]:
     )
 
 
-def _hovertemplate(x: str, y: str, z: str) -> str:
+def _hovertemplate(x: str, y: str, z: str, *, with_volume: bool = False) -> str:
     # Audit B-Minor / patch 04: the values on each axis are USD (T0-deflated),
     # not multipliers. Format with $ prefix and no "x" suffix to match.
     # customdata[1] (asset_in_time) is also a USD value — same convention.
-    return (
+    head = (
         "<b>Date:</b> %{text}<br>"
         "<b>Nominal Fiat Price:</b> $%{customdata[0]:,.2f}<br>"
         "<b>Time-deflated USD:</b> $%{customdata[1]:,.2f}<br>"
+    )
+    if with_volume:
+        # customdata[2] = dollar turnover (USD), customdata[3] = vol z-score.
+        head += (
+            "<b>Daily Turnover:</b> $%{customdata[2]:,.0f}<br>"
+            "<b>Vol z-score (252d):</b> %{customdata[3]:+.2f}<br>"
+        )
+    return head + (
         "<hr>"
         f"{x}: $%{{x:,.2f}}<br>"
         f"{y}: $%{{y:,.2f}}<br>"
@@ -89,14 +118,125 @@ def _hovertemplate(x: str, y: str, z: str) -> str:
     )
 
 
-def _customdata_array(df: pd.DataFrame) -> np.ndarray:
+def _customdata_array(
+    df: pd.DataFrame,
+    *,
+    z_series: pd.Series | None = None,
+) -> np.ndarray:
     nominal = df["nominal_usd"].to_numpy()
     in_time = (
         df["asset_in_time"].to_numpy()
         if "asset_in_time" in df.columns
         else np.full(len(df), np.nan)
     )
-    return np.stack([nominal, in_time], axis=-1)
+    layers = [nominal, in_time]
+    if z_series is not None:
+        turnover = (
+            df["dollar_turnover"].to_numpy()
+            if "dollar_turnover" in df.columns
+            else np.full(len(df), np.nan)
+        )
+        layers.append(turnover)
+        layers.append(z_series.to_numpy())
+    return np.stack(layers, axis=-1)
+
+
+def _zscore_to_opacity(z: pd.Series) -> np.ndarray:
+    """Map a volume z-score series to per-row opacity in [floor, 1.0].
+
+    Warm-up rows (NaN z-score) collapse to the floor — visually marked as
+    "low conviction, possibly because the rolling window hasn't filled yet,"
+    which is the right epistemic stance.
+    """
+    filled = z.fillna(_OPACITY_WARMUP_FILL_Z)
+    op = (_OPACITY_Z_OFFSET + _OPACITY_Z_SLOPE * filled).clip(_OPACITY_FLOOR, 1.0)
+    return op.to_numpy()
+
+
+def _time_alpha_rgba(time_numeric: np.ndarray, alphas: np.ndarray) -> list[str]:
+    """Encode (time-color * per-marker alpha) as ``rgba(...)`` strings.
+
+    Plotly 3D markers accept an array of color strings, which is the only
+    supported way to vary alpha *per marker*. ``marker.opacity`` is scalar
+    only; baking the alpha into RGBA color strings is the documented
+    workaround. The line trace continues to use ``colorscale="Viridis"`` over
+    the numeric ``time_numeric`` array, so the time gradient stays visible.
+    """
+    lo = float(time_numeric.min())
+    hi = float(time_numeric.max())
+    span = hi - lo if hi > lo else 1.0
+    normed = (time_numeric - lo) / span
+    rgb_strs = sample_colorscale("Viridis", normed.tolist())
+    out: list[str] = []
+    for rgb, a in zip(rgb_strs, alphas, strict=True):
+        # rgb_str like "rgb(68, 1, 84)"
+        body = rgb.removeprefix("rgb(").rstrip(")")
+        out.append(f"rgba({body}, {float(a):.4f})")
+    return out
+
+
+def _marker_dict(
+    *,
+    sizes: np.ndarray,
+    time_numeric: np.ndarray,
+    color_range: tuple[float, float],
+    opacity: np.ndarray | float,
+) -> dict[str, Any]:
+    """Build the per-frame ``marker=dict(...)`` payload.
+
+    When ``opacity`` is a per-row array, marker color is encoded as RGBA
+    strings (alpha baked in) — Plotly's only path to per-marker alpha. When
+    it's a scalar, we keep the legacy numeric+colorscale+scalar-opacity
+    approach so behavior is identical for assets without volume.
+    """
+    if isinstance(opacity, np.ndarray):
+        return dict(
+            size=sizes,
+            color=_time_alpha_rgba(time_numeric, opacity),
+            opacity=1.0,
+        )
+    return dict(
+        size=sizes,
+        color=time_numeric,
+        colorscale="Viridis",
+        opacity=opacity,
+        showscale=False,
+        cmin=color_range[0],
+        cmax=color_range[1],
+    )
+
+
+def _resolve_opacity(df_full: pd.DataFrame) -> tuple[np.ndarray | float, pd.Series | None]:
+    """Decide whether to use per-marker opacity from volume z-scores.
+
+    Returns ``(opacity, z_series)``:
+      - ``opacity`` is either a numpy array (one entry per row of ``df_full``)
+        or the scalar fallback ``_OPACITY_DEFAULT``.
+      - ``z_series`` is the underlying z-score series when per-marker opacity
+        is active; ``None`` when falling back. Used by the hover template.
+
+    Falls back to scalar opacity in three situations:
+      1. No ``dollar_turnover`` column at all (legacy DivisionArrays).
+      2. Sparse coverage of *positive* turnover — both NaN and zero are
+         disqualifying (yfinance stores 0 for index-only series like
+         ``^SP500TR`` rather than NULL, so a NaN-only check would slip past).
+      3. The resulting z-score series itself is mostly NaN (defensive — for
+         e.g. all-equal turnover where rolling std is 0).
+    """
+    if "dollar_turnover" not in df_full.columns:
+        return _OPACITY_DEFAULT, None
+    turnover = df_full["dollar_turnover"]
+    # Both NaN and zero are "no real trading happened that day". Mask zeros
+    # to NaN before measuring coverage so all-zero series (e.g. ^SP500TR
+    # index data) fall through to the scalar fallback rather than rendering
+    # uniformly floor-opacity markers.
+    positive = turnover.where(turnover > 0)
+    if coverage_ratio(positive) < _OPACITY_COVERAGE_THRESHOLD:
+        return _OPACITY_DEFAULT, None
+    z = rolling_volume_zscore(turnover)
+    if coverage_ratio(z) < _OPACITY_COVERAGE_THRESHOLD:
+        return _OPACITY_DEFAULT, None
+    return _zscore_to_opacity(z), z
 
 
 def build_phase_space_figure(
@@ -140,23 +280,42 @@ def build_phase_space_figure(
         — every frame stores its full cumulative trajectory, so unbounded
         daily resolution produces tens of MB of redundant data).
     """
-    df = da.to_frame().dropna(subset=[x, y, z])
+    df_full = da.to_frame().dropna(subset=[x, y, z])
 
-    if df.empty:
+    if df_full.empty:
         raise RuntimeError(
             "no rows with all three axes populated; check numéraire coverage"
         )
 
+    # Opacity from volume z-score is computed on the FULL daily resolution.
+    # Subsampling for animation must happen *after* — sub-sampling first and
+    # then z-scoring would inflate the effective rolling window (e.g.
+    # 252 daily points becomes 252 * subsample trading days), distorting the
+    # statistic. We slice opacity by the same positional indexer as the df.
+    opacity_full, z_full = _resolve_opacity(df_full)
+
     if subsample is None:
-        subsample = max(1, -(-len(df) // 1500)) if animate else 1
+        subsample = max(1, -(-len(df_full) // 1500)) if animate else 1
     if subsample > 1:
-        sampled = df.iloc[::subsample]
-        # Always include the actual last row — `iloc[::N]` drops it when
-        # len(df) is not a multiple of N+1 (e.g. len=5110, step=4 misses the
-        # final date by 1). Without this, animation ends a few days early.
-        if not sampled.empty and sampled.index[-1] != df.index[-1]:
-            sampled = pd.concat([sampled, df.iloc[[-1]]])
-        df = sampled
+        # Build a positional index list, then take positions on both df and
+        # opacity / z. Always include the actual last row — `iloc[::N]` drops
+        # it when len(df) is not a multiple of N+1 (e.g. len=5110, step=4
+        # misses the final date by 1).
+        position_list = list(range(0, len(df_full), subsample))
+        if position_list[-1] != len(df_full) - 1:
+            position_list.append(len(df_full) - 1)
+        positions = np.asarray(position_list, dtype=np.int64)
+        df = df_full.iloc[positions]
+        opacity = (
+            opacity_full[positions]
+            if isinstance(opacity_full, np.ndarray)
+            else opacity_full
+        )
+        z_sub = z_full.iloc[positions] if z_full is not None else None
+    else:
+        df = df_full
+        opacity = opacity_full
+        z_sub = z_full
 
     if marker_scale is None:
         marker_scale = max(float(df["nominal_usd"].median()) / 10.0, 1.0)
@@ -165,9 +324,10 @@ def build_phase_space_figure(
         raise TypeError("DivisionArray frame must have a DatetimeIndex")
     time_numeric = df.index.astype("int64").to_numpy() / 1e9
     sizes = (df["nominal_usd"] / marker_scale).clip(lower=2, upper=40).to_numpy()
-    customdata = _customdata_array(df)
+    customdata = _customdata_array(df, z_series=z_sub)
     text = df.index.strftime("%Y-%m-%d").to_numpy()
     color_range = (float(time_numeric.min()), float(time_numeric.max()))
+    has_volume = z_sub is not None
 
     if not animate:
         fig = go.Figure(
@@ -177,18 +337,15 @@ def build_phase_space_figure(
                 z=df[z],
                 mode="lines+markers",
                 line=dict(color=time_numeric, colorscale="Viridis", width=4),
-                marker=dict(
-                    size=sizes,
-                    color=time_numeric,
-                    colorscale="Viridis",
-                    opacity=0.7,
-                    showscale=False,
-                    cmin=color_range[0],
-                    cmax=color_range[1],
+                marker=_marker_dict(
+                    sizes=sizes,
+                    time_numeric=time_numeric,
+                    color_range=color_range,
+                    opacity=opacity,
                 ),
                 text=text,
                 customdata=customdata,
-                hovertemplate=_hovertemplate(x, y, z),
+                hovertemplate=_hovertemplate(x, y, z, with_volume=has_volume),
             )
         )
         fig.update_layout(
@@ -209,6 +366,11 @@ def build_phase_space_figure(
 
     def _trace_through(end_inclusive: int) -> go.Scatter3d:
         end = end_inclusive + 1
+        # Opacity slice mirrors the size/color slices. When opacity is the
+        # scalar fallback (no volume), it stays scalar across all frames.
+        opacity_slice: np.ndarray | float = (
+            opacity[:end] if isinstance(opacity, np.ndarray) else opacity
+        )
         return go.Scatter3d(
             x=df[x].iloc[:end].to_numpy(),
             y=df[y].iloc[:end].to_numpy(),
@@ -221,18 +383,15 @@ def build_phase_space_figure(
                 cmin=color_range[0],
                 cmax=color_range[1],
             ),
-            marker=dict(
-                size=sizes[:end],
-                color=time_numeric[:end],
-                colorscale="Viridis",
-                opacity=0.7,
-                showscale=False,
-                cmin=color_range[0],
-                cmax=color_range[1],
+            marker=_marker_dict(
+                sizes=sizes[:end],
+                time_numeric=time_numeric[:end],
+                color_range=color_range,
+                opacity=opacity_slice,
             ),
             text=text[:end],
             customdata=customdata[:end],
-            hovertemplate=_hovertemplate(x, y, z),
+            hovertemplate=_hovertemplate(x, y, z, with_volume=has_volume),
         )
 
     initial_trace = _trace_through(0)

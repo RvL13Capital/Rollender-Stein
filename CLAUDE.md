@@ -48,6 +48,7 @@ src/rollender_stein/
 ├── assets.py                # ingest_yahoo_asset + build_pipeline_for_asset
 ├── persist.py               # dump_all_artifacts → data/derived/*
 ├── patterns.py              # z-scores, correlations, residual diagnostics
+├── volume.py                # dollar-turnover + rolling vol z-score (dashboard conviction channel)
 ├── io/
 │   ├── fred.py              # FRED + ALFRED clients + PUBLICATION_LAG_BD
 │   ├── eia.py               # EIA petroleum spot client
@@ -88,6 +89,25 @@ Coverage: market-cap layer applies only to **US-listed individual stocks**
 that file 10-K/10-Q with the SEC. Indexes, ETFs, futures, crypto, and foreign
 issuers are out of scope (they don't have meaningful "shares outstanding" in
 the same sense). EDGAR's XBRL coverage starts ~2008-2009.
+
+## Dashboard conviction channel (volume → marker opacity)
+
+`build_pipeline_for_asset` reads raw close + volume and computes
+`dollar_turnover = raw_close * volume`. The raw close is intentional:
+yfinance retroactively split-adjusts both Close and Volume in opposite
+directions, so the product cancels splits and yields the historical USD
+turnover. `adj_close * volume` would distort by the accumulated dividend
+yield.
+
+`dashboard.build_phase_space_figure` then computes a 252-day rolling z-score
+of `log(dollar_turnover)` (zeros masked to NaN before log to avoid -inf
+poisoning the window) and maps it to per-marker opacity in [0.25, 1.0].
+Plotly 3D requires baking alpha into RGBA color strings (per-marker
+`opacity` is scalar-only); the line trace keeps the time-color gradient.
+
+Fallback to scalar opacity 0.7 when the asset has <50% positive turnover —
+catches indexes (`^SP500TR` has volume=0 always), legacy ingests with
+sparse coverage, and brand-new tickers below the rolling window's warm-up.
 
 ## Forensic principles (HARD RULES, not preferences)
 
