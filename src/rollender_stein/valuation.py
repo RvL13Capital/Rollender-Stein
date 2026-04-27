@@ -27,6 +27,7 @@ generation curve when compared against yieldless numéraires like gold.
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 
 import pandas as pd
@@ -34,6 +35,8 @@ import pandas as pd
 from rollender_stein.calendar import T0_DATE
 
 NUMERAIRE_NAMES = ("Time", "Liquidity", "Gold", "Energy")
+# Tolerance for the T0=100 invariant check (audit patch 04).
+_T0_INVARIANT_TOL = 1e-6
 
 
 @dataclass(frozen=True)
@@ -116,19 +119,54 @@ def build_division_array(
     nominal_aligned = nominal_asset_usd.reindex(base_idx, method="ffill")
     indexed = (nominal_aligned / anchor_for_indexed) * 100.0
 
-    def _ratio(num: pd.Series | None) -> pd.Series | None:
+    def _ratio(num: pd.Series | None, label: str) -> pd.Series | None:
         if num is None:
             return None
-        # Asset_in_X = (nominal_USD / N_X) * 100 — units are T0-deflated USD.
-        ratio: pd.Series = (nominal_aligned / num.reindex(base_idx)) * 100.0
+        # Audit patch 04: surface deviations from the T0=100 invariant. The
+        # whole point of "T0-deflated USD" units is that every numéraire
+        # equals 100 at T0; if it doesn't, the corresponding axis is in a
+        # different gauge and cross-axis comparisons are not commensurable.
+        # As of patch 06, N_Gold may legitimately be NaN at T0 (8-month gap
+        # before GC=F starts) — the warning honestly signals this.
+        if t0_date in num.index:
+            v = num.loc[t0_date]
+            if pd.isna(v):
+                warnings.warn(
+                    f"numéraire {label!r} is NaN at T0; the corresponding "
+                    "axis is anchored at its first valid date instead, "
+                    "breaking dimensional homogeneity across the phase space.",
+                    RuntimeWarning,
+                    stacklevel=3,
+                )
+            elif abs(float(v) - 100.0) > _T0_INVARIANT_TOL:
+                warnings.warn(
+                    f"numéraire {label!r} is {float(v):.4f} at T0 (expected 100.00); "
+                    "Asset_in_X is NOT in T0-deflated USD for this axis.",
+                    RuntimeWarning,
+                    stacklevel=3,
+                )
+        else:
+            warnings.warn(
+                f"numéraire {label!r} has no observation at T0 ({t0_date.date()}); "
+                "axis is in an undefined gauge.",
+                RuntimeWarning,
+                stacklevel=3,
+            )
+
+        # Audit patch 04: replace zero denominators with NaN so we get NaN
+        # propagation instead of silent ±inf. N_X = 0 cannot occur on real
+        # data (gold has never traded at zero) but the guard is defensive.
+        denom = num.reindex(base_idx)
+        denom = denom.where(denom != 0)
+        ratio: pd.Series = (nominal_aligned / denom) * 100.0
         out_name = str(num.name) if num.name is not None else "asset_in_X"
         return ratio.rename(out_name)
 
     return DivisionArray(
         nominal_usd=nominal_aligned.rename("nominal_usd"),
         asset_indexed=indexed.rename("asset_indexed"),
-        asset_in_time=_ratio(n_time),
-        asset_in_liquidity=_ratio(n_liquidity),
-        asset_in_gold=_ratio(n_gold),
-        asset_in_energy=_ratio(n_energy),
+        asset_in_time=_ratio(n_time, "n_time"),
+        asset_in_liquidity=_ratio(n_liquidity, "n_liquidity"),
+        asset_in_gold=_ratio(n_gold, "n_gold"),
+        asset_in_energy=_ratio(n_energy, "n_energy"),
     )

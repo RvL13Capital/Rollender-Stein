@@ -135,3 +135,76 @@ def test_nominal_kept_in_to_frame() -> None:
     assert df.loc[pd.Timestamp("2010-01-04"), "nominal_usd"] == 3000.0
     assert "asset_in_liquidity" in df.columns
     assert "asset_in_gold" not in df.columns
+
+
+# ----- Audit patch 04: defensive guards ---------------------------------------
+
+
+def test_no_warning_when_all_numeraires_anchored_at_100_at_t0() -> None:
+    """The post-patch-06 healthy case: every numéraire = 100 exact at T0,
+    no axis is in a different gauge, no warning fires."""
+    import warnings as _w
+
+    dates = [str(T0_DATE.date()), "2010-01-04"]
+    asset = _series([1500.0, 3000.0], dates, "spx")
+    n_time = _series([100.0, 130.0], dates, "N_Time")
+    n_liq = _series([100.0, 150.0], dates, "N_Liq")
+    n_e = _series([100.0, 200.0], dates, "N_Energy")
+
+    with _w.catch_warnings():
+        _w.simplefilter("error")  # any warning is now an error
+        build_division_array(asset, n_time=n_time, n_liquidity=n_liq, n_energy=n_e)
+
+
+def test_warning_fires_when_numeraire_is_nan_at_t0() -> None:
+    """Patch-06 known case: N_Gold is NaN at T0 (8-month gap). A
+    RuntimeWarning surfaces this honestly."""
+    dates = [str(T0_DATE.date()), "2006-01-03", "2010-01-04"]
+    asset = _series([1500.0, 1700.0, 3000.0], dates, "spx")
+    n_gold = _series([float("nan"), 100.0, 200.0], dates, "n_gold")
+
+    with pytest.warns(RuntimeWarning, match=r"NaN at T0"):
+        build_division_array(asset, n_gold=n_gold)
+
+
+def test_warning_fires_when_numeraire_not_100_at_t0() -> None:
+    """If a numéraire is not exactly 100 at T0 (anchor bug), warn loudly."""
+    dates = [str(T0_DATE.date()), "2010-01-04"]
+    asset = _series([1500.0, 3000.0], dates, "spx")
+    n_liq = _series([99.5, 150.0], dates, "n_liquidity")  # 99.5 ≠ 100 at T0
+
+    with pytest.warns(RuntimeWarning, match=r"99\.5"):
+        build_division_array(asset, n_liquidity=n_liq)
+
+
+def test_warning_fires_when_numeraire_has_no_t0_observation() -> None:
+    """If T0 isn't even in the numéraire's index, warn — the axis has
+    no defined gauge at the reference date."""
+    # numéraire dates do NOT include T0_DATE
+    dates = ["2010-01-04", "2020-01-06"]
+    asset = _series([1500.0, 3000.0], dates, "spx")
+    n_time = _series([100.0, 200.0], dates, "n_time")  # no T0 row!
+
+    with pytest.warns(RuntimeWarning, match=r"no observation at T0"):
+        build_division_array(asset, n_time=n_time)
+
+
+def test_zero_in_numeraire_produces_nan_not_inf() -> None:
+    """Patch 04 division-by-zero guard: a zero in the denominator must
+    propagate as NaN, not silent ±inf. This cannot happen on real data
+    but is defensive against malformed numéraires."""
+    import warnings as _w
+
+    dates = [str(T0_DATE.date()), "2010-01-04", "2020-01-06"]
+    asset = _series([1500.0, 3000.0, 4500.0], dates, "spx")
+    # N_Time legitimately starts at 100, then drops to 0 — synthetic.
+    n_time = _series([100.0, 0.0, 200.0], dates, "n_time")
+
+    with _w.catch_warnings():
+        _w.simplefilter("ignore")  # we don't care about other warnings here
+        da = build_division_array(asset, n_time=n_time)
+    # At the zero-denominator date, ratio must be NaN, not inf.
+    assert pd.isna(da.asset_in_time.loc[pd.Timestamp("2010-01-04")])
+    # Surrounding dates compute normally.
+    assert pd.notna(da.asset_in_time.loc[T0_DATE])
+    assert pd.notna(da.asset_in_time.loc[pd.Timestamp("2020-01-06")])
