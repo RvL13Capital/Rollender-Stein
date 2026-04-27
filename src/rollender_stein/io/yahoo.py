@@ -82,7 +82,9 @@ def fetch_yahoo_history(
         df.columns = df.columns.get_level_values(0)
 
     if "Close" not in df.columns:
-        raise ValueError(f"yfinance returned no Close column for {ticker!r}; got {list(df.columns)}")
+        raise ValueError(
+            f"yfinance returned no Close column for {ticker!r}; got {list(df.columns)}"
+        )
 
     idx = df.index
     if getattr(idx, "tz", None) is not None:

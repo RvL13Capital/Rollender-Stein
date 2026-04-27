@@ -95,7 +95,11 @@ def extend_levels_with_growth(
     return pd.concat([levels.dropna(), extension]).sort_index()
 
 
-def _stream_to_indexed_series(con, series_id: str, name: str) -> pd.Series:
+def _stream_to_indexed_series(
+    con: duckdb.DuckDBPyConnection,
+    series_id: str,
+    name: str,
+) -> pd.Series:
     df = latest_release_stream(con, series_id)
     if df.empty:
         raise RuntimeError(f"no rows for {series_id} in macro_release; ingest first")
@@ -139,7 +143,10 @@ def build_n_liq(
         frame = pd.DataFrame(
             {"release_date": stream.index, col_name: stream.to_numpy()}
         )
-        return forward_fill_to_calendar(frame, cal, value_cols=[col_name])[col_name]
+        result: pd.Series = forward_fill_to_calendar(
+            frame, cal, value_cols=[col_name]
+        )[col_name]
+        return result
 
     us_m2_d = _locf(us_m2_billions, "us_m2") * 1e9          # billions → raw USD
     ez_m3_d = _locf(ez_m3_eur_extended, "ez_m3")             # raw EUR

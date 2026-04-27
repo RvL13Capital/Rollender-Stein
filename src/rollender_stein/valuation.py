@@ -3,8 +3,9 @@
 Given a target asset's daily nominal USD price and the available numéraires,
 compute the four absolute-valuation arrays:
 
-    Asset_indexed(t)        = (Asset_USD(t) / Asset_USD(T0)) * 100
-    Asset_in_X(t)           = (Asset_indexed(t) / N_X(t)) * 100   for X in {Time, Liquidity, Gold, Energy}
+    Asset_indexed(t) = (Asset_USD(t) / Asset_USD(T0)) * 100
+    Asset_in_X(t)    = (Asset_indexed(t) / N_X(t)) * 100
+        for X in {Time, Liquidity, Gold, Energy}
 
 By construction Asset_in_X(T0) == 100.0 whenever both the asset and N_X have
 values at T0. Where N_X is NaN (e.g. N_Gold before 2006-01-03 in our setup),

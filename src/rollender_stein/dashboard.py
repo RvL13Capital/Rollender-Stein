@@ -16,6 +16,9 @@ Two render modes:
 
 from __future__ import annotations
 
+from os import PathLike
+from typing import Any
+
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
@@ -30,7 +33,7 @@ AXIS_LABELS: dict[str, str] = {
 }
 
 
-def _scene_layout(x: str, y: str, z: str, df: pd.DataFrame) -> dict:
+def _scene_layout(x: str, y: str, z: str, df: pd.DataFrame) -> dict[str, Any]:
     """Locked scene config — fixed axis ranges so animation doesn't auto-rescale."""
 
     def _range(col: str) -> list[float]:
@@ -144,7 +147,13 @@ def build_phase_space_figure(
     if subsample is None:
         subsample = max(1, -(-len(df) // 1500)) if animate else 1
     if subsample > 1:
-        df = df.iloc[::subsample]
+        sampled = df.iloc[::subsample]
+        # Always include the actual last row — `iloc[::N]` drops it when
+        # len(df) is not a multiple of N+1 (e.g. len=5110, step=4 misses the
+        # final date by 1). Without this, animation ends a few days early.
+        if not sampled.empty and sampled.index[-1] != df.index[-1]:
+            sampled = pd.concat([sampled, df.iloc[[-1]]])
+        df = sampled
 
     if marker_scale is None:
         marker_scale = max(float(df["nominal_usd"].median()) / 10.0, 1.0)
@@ -309,6 +318,6 @@ def build_phase_space_figure(
     return fig
 
 
-def save_dashboard_html(fig: go.Figure, path: str | "PathLike") -> None:
+def save_dashboard_html(fig: go.Figure, path: str | PathLike[str]) -> None:
     """Write a self-contained HTML rendering of ``fig``."""
     fig.write_html(str(path), include_plotlyjs="cdn", full_html=True)

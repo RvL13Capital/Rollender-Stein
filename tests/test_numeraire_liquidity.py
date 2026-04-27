@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import numpy as np
 import pandas as pd
 import pytest
 
@@ -106,7 +105,13 @@ def _seed_minimal_panel(con, monthly_dates: list[str], wm_dates: list[str]) -> N
     insert_macro_releases(
         con,
         ALL_SERIES["EZ_M3_GROWTH"],
-        pd.DataFrame({"reference_date": monthly_idx, "release_date": monthly_idx, "value": [0.3] * len(monthly_idx)}),
+        pd.DataFrame(
+            {
+                "reference_date": monthly_idx,
+                "release_date": monthly_idx,
+                "value": [0.3] * len(monthly_idx),
+            }
+        ),
         source="FRED",
     )
     insert_macro_releases(
@@ -124,7 +129,13 @@ def _seed_minimal_panel(con, monthly_dates: list[str], wm_dates: list[str]) -> N
     insert_macro_releases(
         con,
         ALL_SERIES["JP_M3_GROWTH"],
-        pd.DataFrame({"reference_date": monthly_idx, "release_date": monthly_idx, "value": [0.1] * len(monthly_idx)}),
+        pd.DataFrame(
+            {
+                "reference_date": monthly_idx,
+                "release_date": monthly_idx,
+                "value": [0.1] * len(monthly_idx),
+            }
+        ),
         source="FRED",
     )
 

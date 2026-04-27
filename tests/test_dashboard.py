@@ -76,8 +76,10 @@ def test_animated_figure_has_chronological_frames() -> None:
     )
     assert len(fig.frames) > 0
     # Frame cardinality grows monotonically (we replay a build-up).
+    from itertools import pairwise
+
     sizes = [len(frame.data[0].x) for frame in fig.frames]
-    assert all(b >= a for a, b in zip(sizes, sizes[1:])), (
+    assert all(b >= a for a, b in pairwise(sizes)), (
         f"frame trajectory lengths should be non-decreasing, got {sizes}"
     )
     # Frame names are dates in chronological order.
@@ -86,7 +88,10 @@ def test_animated_figure_has_chronological_frames() -> None:
     assert (parsed.to_series().diff().dropna() >= pd.Timedelta(0)).all()
     # Last frame includes every plotted row.
     last_size = sizes[-1]
-    assert last_size == len(da.to_frame().dropna(subset=["asset_in_time", "asset_in_liquidity", "asset_in_gold"]))
+    expected_rows = len(
+        da.to_frame().dropna(subset=["asset_in_time", "asset_in_liquidity", "asset_in_gold"])
+    )
+    assert last_size == expected_rows
 
 
 def test_animated_figure_has_play_and_slider() -> None:

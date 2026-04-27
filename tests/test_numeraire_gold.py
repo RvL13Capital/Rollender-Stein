@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from rollender_stein.numeraires.gold import EXOG_COLS, fit_gold_model
+from rollender_stein.numeraires.gold import fit_gold_model
 
 
 def _synthetic_panel(n_obs: int = 400, seed: int = 42) -> pd.DataFrame:
