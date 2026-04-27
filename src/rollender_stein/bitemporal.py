@@ -36,7 +36,8 @@ CREATE TABLE IF NOT EXISTS macro_release (
     source         VARCHAR  NOT NULL,
     vintage        VARCHAR,
     ingested_at    TIMESTAMP DEFAULT current_timestamp,
-    PRIMARY KEY (series_id, reference_date, release_date)
+    PRIMARY KEY (series_id, reference_date, release_date),
+    CHECK (release_date >= reference_date)
 );
 
 CREATE TABLE IF NOT EXISTS asset_price (
@@ -87,6 +88,28 @@ def open_db(path: Path | str = DEFAULT_DB_PATH) -> Iterator[duckdb.DuckDBPyConne
         yield con
     finally:
         con.close()
+
+
+def _validate_release_after_reference(rows: pd.DataFrame) -> None:
+    """Application-level enforcement of the CHECK constraint.
+
+    DuckDB does not currently support ``ALTER TABLE ADD CONSTRAINT CHECK``
+    on an existing table (NotImplementedException), so we cannot retro-apply
+    the constraint to a pre-existing DB created before audit patch 01. The
+    inline CHECK in ``_SCHEMA_DDL`` enforces it for new DBs.
+
+    For pre-existing DBs we enforce the same invariant in software at the
+    only documented write path (``insert_macro_releases``). Manual SQL
+    INSERTs bypass this, but the audit's threat model is synthetic
+    look-ahead injection via the application API, which is closed.
+    """
+    bad_mask = rows["release_date"] < rows["reference_date"]
+    if bad_mask.any():
+        bad = rows.loc[bad_mask, ["reference_date", "release_date"]].head(3)
+        raise ValueError(
+            f"release_date < reference_date violates audit patch 01 invariant; "
+            f"first offending rows:\n{bad.to_string(index=False)}"
+        )
 
 
 def migrate_publication_lags(con: duckdb.DuckDBPyConnection) -> int:
@@ -192,6 +215,11 @@ def insert_macro_releases(
         raise KeyError(f"insert_macro_releases: missing columns {sorted(missing)}")
 
     df = rows[["reference_date", "release_date", "value"]].copy()
+    # Audit patch 01: enforce release_date >= reference_date at the application
+    # boundary. The inline CHECK in _SCHEMA_DDL covers freshly-created DBs;
+    # this guard covers pre-existing DBs (DuckDB does not yet support
+    # ALTER TABLE ADD CONSTRAINT CHECK).
+    _validate_release_after_reference(df)
     df["series_id"] = series_id
     df["source"] = source
     df["vintage"] = vintage

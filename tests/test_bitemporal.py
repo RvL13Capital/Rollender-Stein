@@ -162,6 +162,71 @@ def test_migrate_publication_lags_does_not_touch_unlisted_series(con) -> None:
     assert [r[0] for r in post] == [d.date() for d in dates]
 
 
+def test_release_after_reference_invariant_blocks_bad_insert(con) -> None:
+    """Audit patch 01: insert_macro_releases must reject release_date <
+    reference_date at the application boundary.
+
+    The inline CHECK in _SCHEMA_DDL enforces this at the DB level for fresh
+    DBs; the ValueError raised by _validate_release_after_reference enforces
+    it for pre-existing DBs (DuckDB does not yet support ALTER TABLE ADD
+    CONSTRAINT CHECK)."""
+    bad = pd.DataFrame(
+        {
+            "reference_date": pd.to_datetime(["2024-01-15"]),
+            "release_date":   pd.to_datetime(["2024-01-01"]),  # BEFORE reference!
+            "value": [42.0],
+        }
+    )
+    with pytest.raises(ValueError, match=r"release_date.*reference_date"):
+        insert_macro_releases(con, "BAD_SERIES", bad, source="UNITTEST")
+
+
+def test_release_equal_to_reference_is_allowed(con) -> None:
+    """For daily series with no publication lag, release == reference is valid."""
+    good = pd.DataFrame(
+        {
+            "reference_date": pd.to_datetime(["2024-01-15"]),
+            "release_date":   pd.to_datetime(["2024-01-15"]),
+            "value": [42.0],
+        }
+    )
+    insert_macro_releases(con, "EQUAL_SERIES", good, source="UNITTEST")
+    n = con.execute(
+        "SELECT COUNT(*) FROM macro_release WHERE series_id='EQUAL_SERIES'"
+    ).fetchone()[0]
+    assert n == 1
+
+
+def test_release_after_reference_is_allowed(con) -> None:
+    """Standard ALFRED-style data: release > reference by some lag → allowed."""
+    rows = pd.DataFrame(
+        {
+            "reference_date": pd.to_datetime(["2024-01-31"]),
+            "release_date":   pd.to_datetime(["2024-02-15"]),  # 15 days later — fine
+            "value": [42.0],
+        }
+    )
+    insert_macro_releases(con, "GOOD_SERIES", rows, source="UNITTEST")
+    n = con.execute(
+        "SELECT COUNT(*) FROM macro_release WHERE series_id='GOOD_SERIES'"
+    ).fetchone()[0]
+    assert n == 1
+
+
+def test_release_after_reference_validation_message_lists_offending_rows(con) -> None:
+    """The error message includes the first offending rows so the user can
+    debug their input."""
+    bad = pd.DataFrame(
+        {
+            "reference_date": pd.to_datetime(["2024-01-15", "2024-02-15"]),
+            "release_date":   pd.to_datetime(["2024-01-01", "2024-02-15"]),
+            "value": [1.0, 2.0],
+        }
+    )
+    with pytest.raises(ValueError, match="2024-01-15"):
+        insert_macro_releases(con, "BAD_SERIES", bad, source="UNITTEST")
+
+
 def test_migrate_publication_lags_preserves_alfred_anchored_rows(con) -> None:
     """For series like WM2NS with mixed data (some rows from ALFRED with
     legitimate release_date != reference_date, some from live-endpoint with
