@@ -18,6 +18,41 @@ import pandas as pd
 FRED_BASE = "https://api.stlouisfed.org/fred"
 DEFAULT_REALTIME_START = "1990-01-01"
 
+# Publication lag in business days from the reference date to the earliest
+# moment the public could USE the value (audit C-3 / patch 02). The previous
+# code used `release_date == reference_date` for ALL live-endpoint series,
+# which embedded a same-day-to-multi-week look-ahead in the LOCF stream
+# depending on each series' real publication cadence.
+#
+# Conservative — round UP to be on the safe side for backtesting.
+#   * H.15 (DFII10):              yields published next BD ~4:15pm ET
+#   * H.10 (DTWEXBGS, DEX*):      broad dollar / FX, next BD
+#   * VIXCLS:                     close-of-day publication, available
+#                                 at session close (lag = 0)
+#   * H.6 (WM2NS):                weekly, Tuesday for week ending prior
+#                                 Monday → ~5 BD after the Monday reference
+#   * MABMM301* (BIS broad money): monthly aggregates, ~30 days after
+#                                 month-end via OECD MEI
+#
+# Series not listed default to 0 BD lag. Adding a series here without
+# also running migrate_publication_lags() will produce inconsistent
+# release_dates between newly-fetched rows (with lag) and pre-existing
+# rows (without lag). The migration is idempotent and scoped to known
+# series, so re-running is safe.
+PUBLICATION_LAG_BD: dict[str, int] = {
+    "DFII10":          1,
+    "DTWEXBGS":        1,
+    "DTWEXM":          1,   # legacy series, kept for completeness
+    "DEXUSEU":         1,
+    "DEXJPUS":         1,
+    "VIXCLS":          0,
+    "WM2NS":           5,
+    "MABMM301EZM189S": 30,
+    "MABMM301JPM189S": 30,
+    "MABMM301EZM657S": 30,
+    "MABMM301JPM657S": 30,
+}
+
 
 class _RequestsLike(Protocol):
     def get(
@@ -179,7 +214,11 @@ def fetch_fred_observations(
 
     df = pd.DataFrame(payload["observations"])
     df["reference_date"] = pd.to_datetime(df["date"])
-    df["release_date"] = df["reference_date"]
+    lag_bd = PUBLICATION_LAG_BD.get(series_id, 0)
+    if lag_bd > 0:
+        df["release_date"] = df["reference_date"] + pd.tseries.offsets.BDay(lag_bd)
+    else:
+        df["release_date"] = df["reference_date"]
     df["value"] = pd.to_numeric(df["value"], errors="coerce")
 
     return (

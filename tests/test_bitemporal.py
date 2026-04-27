@@ -92,3 +92,109 @@ def test_insert_rejects_missing_columns(con) -> None:
 def test_stream_for_unknown_series_is_empty(con) -> None:
     stream = latest_release_stream(con, "DOES_NOT_EXIST")
     assert len(stream) == 0
+
+
+# ----- migrate_publication_lags (audit patch 02) ------------------------------
+
+
+def test_migrate_publication_lags_updates_listed_series(con) -> None:
+    """Rows for series_ids listed in PUBLICATION_LAG_BD with non-zero lag
+    must have their release_dates shifted forward by BDay(lag)."""
+    from rollender_stein.bitemporal import migrate_publication_lags
+
+    # Seed DFII10 (lag=1 BD) with release == reference
+    dates = pd.to_datetime(["2024-01-02", "2024-01-03", "2024-01-04"])
+    rows = pd.DataFrame(
+        {"reference_date": dates, "release_date": dates, "value": [4.21, 4.18, 4.15]}
+    )
+    insert_macro_releases(con, "DFII10", rows, source="FRED")
+
+    # Pre-migration: release == reference
+    pre = con.execute(
+        "SELECT release_date FROM macro_release WHERE series_id='DFII10' ORDER BY reference_date"
+    ).fetchall()
+    assert [r[0] for r in pre] == [d.date() for d in dates]
+
+    n = migrate_publication_lags(con)
+    assert n == 3
+
+    # Post-migration: release == reference + 1 BD
+    post = con.execute(
+        "SELECT release_date FROM macro_release WHERE series_id='DFII10' ORDER BY reference_date"
+    ).fetchall()
+    expected = [(d + pd.tseries.offsets.BDay(1)).date() for d in dates]
+    assert [r[0] for r in post] == expected
+
+
+def test_migrate_publication_lags_is_idempotent(con) -> None:
+    """Running the migration twice must not change anything after the first run."""
+    from rollender_stein.bitemporal import migrate_publication_lags
+
+    dates = pd.to_datetime(["2023-11-01", "2023-12-01"])
+    rows = pd.DataFrame(
+        {"reference_date": dates, "release_date": dates, "value": [1.0, 2.0]}
+    )
+    insert_macro_releases(con, "MABMM301EZM189S", rows, source="FRED")
+
+    n1 = migrate_publication_lags(con)
+    n2 = migrate_publication_lags(con)
+    assert n1 == 2
+    assert n2 == 0  # second run finds no `release == reference` rows for this series
+
+
+def test_migrate_publication_lags_does_not_touch_unlisted_series(con) -> None:
+    """Series NOT in PUBLICATION_LAG_BD must be untouched by the migration."""
+    from rollender_stein.bitemporal import migrate_publication_lags
+
+    dates = pd.to_datetime(["2020-06-15", "2020-07-15"])
+    rows = pd.DataFrame(
+        {"reference_date": dates, "release_date": dates, "value": [1.0, 2.0]}
+    )
+    insert_macro_releases(con, "SOME_RANDOM_SERIES", rows, source="UNKNOWN")
+
+    migrate_publication_lags(con)
+
+    post = con.execute(
+        "SELECT release_date FROM macro_release WHERE series_id='SOME_RANDOM_SERIES' "
+        "ORDER BY reference_date"
+    ).fetchall()
+    # Untouched: release_date still equals reference_date
+    assert [r[0] for r in post] == [d.date() for d in dates]
+
+
+def test_migrate_publication_lags_preserves_alfred_anchored_rows(con) -> None:
+    """For series like WM2NS with mixed data (some rows from ALFRED with
+    legitimate release_date != reference_date, some from live-endpoint with
+    release == reference), migration must touch ONLY the live-endpoint rows.
+
+    This was the audit's biggest landmine: blanket update would corrupt the
+    ALFRED-derived rows. The WHERE release_date == reference_date guard
+    prevents this."""
+    from rollender_stein.bitemporal import migrate_publication_lags
+
+    # Mix: one ALFRED-style row (release > reference by 7 days) + one live row
+    alfred_ref = pd.Timestamp("2010-01-04")
+    alfred_rel = pd.Timestamp("2010-01-11")
+    live_dates = pd.to_datetime(["2020-01-06", "2020-01-13"])
+    rows = pd.DataFrame(
+        {
+            "reference_date": [alfred_ref, *live_dates],
+            "release_date":   [alfred_rel, *live_dates],
+            "value":          [10.0, 20.0, 30.0],
+        }
+    )
+    insert_macro_releases(con, "WM2NS", rows, source="FRED")
+
+    migrate_publication_lags(con)
+
+    post = con.execute(
+        "SELECT reference_date, release_date FROM macro_release "
+        "WHERE series_id='WM2NS' ORDER BY reference_date"
+    ).fetchall()
+    # ALFRED row preserved exactly
+    assert pd.Timestamp(post[0][0]) == alfred_ref
+    assert pd.Timestamp(post[0][1]) == alfred_rel
+    # Live rows shifted by 5 BD (WM2NS lag)
+    for i, ref in enumerate(live_dates):
+        expected_release = ref + pd.tseries.offsets.BDay(5)
+        assert pd.Timestamp(post[i + 1][1]) == expected_release

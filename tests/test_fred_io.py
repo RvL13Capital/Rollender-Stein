@@ -114,8 +114,12 @@ def test_passes_expected_query_params() -> None:
     assert params["realtime_end"] == "2026-04-27"
 
 
-def test_fetch_fred_observations_sets_release_to_reference() -> None:
-    """For daily-series live-endpoint fetches, release_date == reference_date."""
+def test_fetch_fred_observations_sets_release_to_reference_for_unknown_series() -> None:
+    """For series NOT in the publication-lag table, release_date == reference_date.
+
+    This is the post-patch-02 default — only series with explicit non-zero
+    lag in PUBLICATION_LAG_BD get the BDay offset.
+    """
     sess = _mock_session(
         {
             "observations": [
@@ -126,11 +130,51 @@ def test_fetch_fred_observations_sets_release_to_reference() -> None:
             ],
         }
     )
-    df = fetch_fred_observations("DFII10", "key", session=sess)
+    df = fetch_fred_observations("UNKNOWN_SERIES_NO_LAG", "key", session=sess)
 
     assert len(df) == 3
     assert df["value"].tolist() == [4.21, 4.18, 4.15]
     assert (df["reference_date"] == df["release_date"]).all()
+
+
+def test_fetch_fred_observations_applies_publication_lag() -> None:
+    """For series listed in PUBLICATION_LAG_BD with non-zero lag, the
+    release_date is offset from reference_date by the configured BDays."""
+    from rollender_stein.io.fred import PUBLICATION_LAG_BD
+
+    sess = _mock_session(
+        {
+            "observations": [
+                {"date": "2024-01-02", "value": "4.21"},  # Tue
+                {"date": "2024-01-03", "value": "4.18"},  # Wed
+            ],
+        }
+    )
+    # DFII10 has lag = 1 BD per the table.
+    assert PUBLICATION_LAG_BD["DFII10"] == 1
+    df = fetch_fred_observations("DFII10", "key", session=sess)
+    assert len(df) == 2
+    # 2024-01-02 (Tue) + 1 BD = 2024-01-03 (Wed)
+    # 2024-01-03 (Wed) + 1 BD = 2024-01-04 (Thu)
+    assert df.loc[0, "release_date"] == pd.Timestamp("2024-01-03")
+    assert df.loc[1, "release_date"] == pd.Timestamp("2024-01-04")
+
+
+def test_fetch_fred_observations_applies_30bd_lag_for_monthly_aggregates() -> None:
+    """The biggest-deal patch-02 case: monthly EZ/JP M3 aggregates get a
+    +30 BD offset, closing the audit C-3 look-ahead injection."""
+    sess = _mock_session(
+        {
+            "observations": [
+                {"date": "2023-11-01", "value": "16025573773633.299"},
+            ],
+        }
+    )
+    df = fetch_fred_observations("MABMM301EZM189S", "key", session=sess)
+    assert len(df) == 1
+    # 30 BD after 2023-11-01 (Wed) is well into December
+    expected = pd.Timestamp("2023-11-01") + pd.tseries.offsets.BDay(30)
+    assert df.loc[0, "release_date"] == expected
 
 
 def test_fetch_fred_observations_no_realtime_params() -> None:

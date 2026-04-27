@@ -17,6 +17,7 @@ portable to Postgres+Timescale if we ever need horizontal scale.
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -65,7 +66,8 @@ CREATE TABLE IF NOT EXISTS fx_close (
 
 @contextmanager
 def open_db(path: Path | str = DEFAULT_DB_PATH) -> Iterator[duckdb.DuckDBPyConnection]:
-    """Open the AVE DuckDB at ``path`` and ensure the schema exists.
+    """Open the AVE DuckDB at ``path`` and ensure the schema + idempotent
+    migrations have been applied.
 
     Pass ``":memory:"`` for an ephemeral in-memory DB (useful for tests).
     """
@@ -77,9 +79,97 @@ def open_db(path: Path | str = DEFAULT_DB_PATH) -> Iterator[duckdb.DuckDBPyConne
         con = duckdb.connect(str(p))
     try:
         con.execute(_SCHEMA_DDL)
+        # Idempotent migrations — safe to re-run on every open. Suppressed
+        # so a migration failure does not block opening the DB; since
+        # migrations are idempotent, the next open will retry.
+        with contextlib.suppress(Exception):
+            migrate_publication_lags(con)
         yield con
     finally:
         con.close()
+
+
+def migrate_publication_lags(con: duckdb.DuckDBPyConnection) -> int:
+    """Apply ``PUBLICATION_LAG_BD`` to existing rows that still have
+    ``release_date == reference_date`` (audit patch 02).
+
+    Idempotent and scoped: only updates rows for series_ids listed in
+    ``PUBLICATION_LAG_BD`` with non-zero lag, AND only those rows where the
+    lag has not already been applied (i.e. ``release_date == reference_date``).
+
+    Returns the total number of rows updated across all series.
+    """
+    # Local import to avoid a circular dependency: io.fred → bitemporal would
+    # be a cycle if PUBLICATION_LAG_BD lived there and we imported it at
+    # module top.
+    from rollender_stein.io.fred import PUBLICATION_LAG_BD
+
+    total_updated = 0
+    for series_id, lag_bd in PUBLICATION_LAG_BD.items():
+        if lag_bd <= 0:
+            continue
+
+        # Read rows still at release == reference (i.e. not yet migrated).
+        existing = con.execute(
+            """
+            SELECT reference_date, release_date, value, source, vintage
+            FROM macro_release
+            WHERE series_id = ? AND release_date = reference_date
+            """,
+            [series_id],
+        ).fetchdf()
+        if existing.empty:
+            continue
+
+        # Compute new release_dates with the BD offset.
+        new_release = pd.to_datetime(existing["reference_date"]) + pd.tseries.offsets.BDay(
+            lag_bd
+        )
+
+        # Atomic transaction: delete the un-lagged rows then insert the
+        # corrected ones. PK is (series_id, reference_date, release_date) and
+        # BDay-offset is monotonic in reference_date so within a single
+        # series no PK collisions occur after the update.
+        new_rows = pd.DataFrame(
+            {
+                "series_id": series_id,
+                "reference_date": existing["reference_date"],
+                "release_date": new_release.dt.date,
+                "value": existing["value"],
+                "source": existing["source"],
+                "vintage": existing["vintage"],
+            }
+        )
+
+        cur = con.cursor()
+        view_name = f"_migrate_{series_id}_{id(new_rows):x}".replace("-", "_").replace(".", "_")
+        cur.register(view_name, new_rows)
+        try:
+            cur.execute("BEGIN TRANSACTION")
+            cur.execute(
+                """
+                DELETE FROM macro_release
+                WHERE series_id = ? AND release_date = reference_date
+                """,
+                [series_id],
+            )
+            cur.execute(
+                f"""
+                INSERT INTO macro_release
+                    (series_id, reference_date, release_date, value, source, vintage)
+                SELECT series_id, reference_date, release_date, value, source, vintage
+                FROM {view_name}
+                """,
+            )
+            cur.execute("COMMIT")
+        except Exception:
+            cur.execute("ROLLBACK")
+            raise
+        finally:
+            cur.unregister(view_name)
+        total_updated += len(existing)
+
+    return total_updated
 
 
 def insert_macro_releases(
