@@ -40,6 +40,22 @@ CREATE TABLE IF NOT EXISTS macro_release (
     CHECK (release_date >= reference_date)
 );
 
+-- shares_outstanding: bitemporal historical share counts from SEC EDGAR.
+-- One row per (ticker, period_end_date, filing_date) so amendments and
+-- restatements are preserved. The latest_shares_stream query picks the
+-- earliest filing per period_end (the original print, not amendments).
+CREATE TABLE IF NOT EXISTS shares_outstanding (
+    ticker          VARCHAR  NOT NULL,
+    period_end_date DATE     NOT NULL,
+    filing_date     DATE     NOT NULL,
+    shares          BIGINT   NOT NULL,
+    form            VARCHAR,
+    source          VARCHAR  NOT NULL,
+    ingested_at     TIMESTAMP DEFAULT current_timestamp,
+    PRIMARY KEY (ticker, period_end_date, filing_date),
+    CHECK (filing_date >= period_end_date)
+);
+
 CREATE TABLE IF NOT EXISTS asset_price (
     series_id    VARCHAR  NOT NULL,
     trade_date   DATE     NOT NULL,
@@ -355,14 +371,117 @@ def insert_asset_prices(
     return len(df)
 
 
+def insert_shares_outstanding(
+    con: duckdb.DuckDBPyConnection,
+    ticker: str,
+    rows: pd.DataFrame,
+    *,
+    source: str,
+) -> int:
+    """Idempotently insert quarterly shares-outstanding history into
+    ``shares_outstanding``. Existing rows on the (ticker, period_end_date,
+    filing_date) PK are replaced.
+
+    ``rows`` must have at minimum: ``period_end_date``, ``filing_date``,
+    ``shares``. Optional: ``form`` (10-K, 10-Q, etc.).
+    """
+    required = {"period_end_date", "filing_date", "shares"}
+    missing = required - set(rows.columns)
+    if missing:
+        raise KeyError(f"insert_shares_outstanding: missing columns {sorted(missing)}")
+
+    # Application-level CHECK (mirrors the schema CHECK; kept for
+    # pre-existing DBs since DuckDB doesn't yet support ALTER TABLE ADD CONSTRAINT).
+    bad_mask = rows["filing_date"] < rows["period_end_date"]
+    if bad_mask.any():
+        bad = rows.loc[bad_mask].head(3)
+        raise ValueError(
+            f"filing_date < period_end_date violates bitemporal invariant; "
+            f"first offending rows:\n{bad.to_string(index=False)}"
+        )
+
+    df = rows[["period_end_date", "filing_date", "shares"]].copy()
+    df["form"] = rows["form"] if "form" in rows.columns else None
+    df["ticker"] = ticker
+    df["source"] = source
+
+    cur = con.cursor()
+    view_name = f"_incoming_shares_{id(df):x}"
+    cur.register(view_name, df)
+    try:
+        cur.execute(
+            f"""
+            INSERT OR REPLACE INTO shares_outstanding
+                (ticker, period_end_date, filing_date, shares, form, source)
+            SELECT ticker, period_end_date, filing_date, shares, form, source
+            FROM {view_name}
+            """,
+        )
+    finally:
+        cur.unregister(view_name)
+    return len(df)
+
+
+def latest_shares_stream(
+    con: duckdb.DuckDBPyConnection,
+    ticker: str,
+) -> pd.DataFrame:
+    """Return one row per FILING_DATE for ``ticker``, after two collapse stages:
+    (1) per period_end, keep the EARLIEST filing_date (original print, not
+        amendments — analogous to first-release vintaging);
+    (2) per filing_date (post stage 1), keep the LATEST period_end (the
+        "headline" disclosure for that filing — same logic
+        ``latest_release_stream`` uses on macro_release).
+
+    The LOCF helper requires unique release_dates; this two-stage dedup
+    guarantees that. Output is sorted by filing_date — the canonical input
+    to the LOCF-onto-daily-calendar step in market-cap construction.
+    """
+    return con.execute(
+        """
+        SELECT period_end_date, filing_date, shares
+        FROM (
+            SELECT
+                period_end_date, filing_date, shares,
+                ROW_NUMBER() OVER (
+                    PARTITION BY filing_date
+                    ORDER BY period_end_date DESC
+                ) AS rn2
+            FROM (
+                SELECT
+                    period_end_date, filing_date, shares,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY period_end_date
+                        ORDER BY filing_date ASC
+                    ) AS rn1
+                FROM shares_outstanding
+                WHERE ticker = ?
+            )
+            WHERE rn1 = 1
+        )
+        WHERE rn2 = 1
+        ORDER BY filing_date ASC
+        """,
+        [ticker],
+    ).fetchdf()
+
+
 def get_asset_closes(
     con: duckdb.DuckDBPyConnection,
     series_id: str,
     *,
     start: pd.Timestamp | None = None,
     end: pd.Timestamp | None = None,
+    prefer_adjusted: bool = True,
 ) -> pd.Series:
     """Read the daily close series for ``series_id`` as a Series indexed by trade_date.
+
+    ``prefer_adjusted=True`` (default) returns the dividend+split-adjusted close
+    (TR-equivalent for equities). Falls back to raw close where adj_close is NaN
+    (futures, crypto). For market-cap absolute valuation, pass
+    ``prefer_adjusted=False`` to get raw close — adj_close has dividend
+    reinvestment baked in, which makes ``raw_shares x adj_close`` an incorrect
+    proxy for market cap.
 
     Empty Series if the series has not been ingested.
     """
@@ -375,7 +494,7 @@ def get_asset_closes(
         where.append("trade_date <= ?")
         params.append(end.date() if hasattr(end, "date") else end)
     sql = f"""
-        SELECT trade_date, close
+        SELECT trade_date, close, adj_close
         FROM asset_price
         WHERE {" AND ".join(where)}
         ORDER BY trade_date ASC
@@ -383,8 +502,19 @@ def get_asset_closes(
     df = con.execute(sql, params).fetchdf()
     if df.empty:
         return pd.Series(name=series_id, dtype="float64")
-    s: pd.Series = df.set_index(pd.DatetimeIndex(df["trade_date"]))["close"]
-    return s.rename(series_id)
+
+    if prefer_adjusted:
+        # Use adj_close where present; fall back to close (futures, crypto,
+        # any pre-deprecation rows where adj_close column may not have data)
+        out = df["adj_close"].where(df["adj_close"].notna(), df["close"])
+    else:
+        out = df["close"]
+    s: pd.Series = pd.Series(
+        out.to_numpy(),
+        index=pd.DatetimeIndex(df["trade_date"]),
+        name=series_id,
+    )
+    return s
 
 
 def latest_release_stream(

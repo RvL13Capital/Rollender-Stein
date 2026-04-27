@@ -169,9 +169,10 @@ def test_save_asset_dashboard_sanitizes_ticker(tmp_path) -> None:
 # ----- ingest_yahoo_asset: TR-via-adj-close + idempotency ---------------------
 
 
-def test_ingest_yahoo_asset_uses_close_when_use_adjusted_false(con, monkeypatch) -> None:
-    """Default behavior: store raw close (not adj_close) in the close column.
-    For ^SP500TR or BTC-USD this is correct (TR built-in / no dividends)."""
+def test_ingest_yahoo_asset_stores_both_close_and_adj_close(con, monkeypatch) -> None:
+    """Post-marketcap-refactor: ingest stores BOTH raw close and adj_close
+    in their proper columns. Consumers select via get_asset_closes(prefer_adjusted=...).
+    """
     import rollender_stein.assets as assets_mod
     from rollender_stein.assets import ingest_yahoo_asset
 
@@ -179,45 +180,52 @@ def test_ingest_yahoo_asset_uses_close_when_use_adjusted_false(con, monkeypatch)
         {
             "trade_date": pd.to_datetime(["2024-01-02", "2024-01-03"]),
             "open": [100.0, 101.0],
-            "close": [101.0, 100.0],
-            "adj_close": [99.0, 98.0],
+            "close": [101.0, 100.0],       # raw
+            "adj_close": [99.0, 98.0],     # dividend+split-adjusted
         }
     )
     monkeypatch.setattr(assets_mod, "fetch_yahoo_ohlcv", lambda *a, **kw: fake)
 
-    n = ingest_yahoo_asset(con, "FAKE_TICK", use_adjusted_as_close=False)
+    n = ingest_yahoo_asset(con, "FAKE_TICK")
     assert n == 2
-    closes = get_asset_closes(con, "FAKE_TICK")
-    # Raw close, not adjusted
-    assert closes.tolist() == [101.0, 100.0]
+
+    # prefer_adjusted=True (default): TR-style adjusted close
+    adj = get_asset_closes(con, "FAKE_TICK", prefer_adjusted=True)
+    assert adj.tolist() == [99.0, 98.0]
+
+    # prefer_adjusted=False: raw close (for market-cap math)
+    raw = get_asset_closes(con, "FAKE_TICK", prefer_adjusted=False)
+    assert raw.tolist() == [101.0, 100.0]
 
 
-def test_ingest_yahoo_asset_uses_adj_close_when_use_adjusted_true(con, monkeypatch) -> None:
-    """For individual stocks (TR via dividends), use_adjusted_as_close=True
-    must store adj_close in the close column so the rest of the pipeline
-    treats the asset as TR."""
+def test_ingest_yahoo_asset_use_adjusted_param_is_deprecated(con, monkeypatch) -> None:
+    """The old use_adjusted_as_close param is now ignored; passing it emits
+    a DeprecationWarning. Both columns are always stored."""
     import rollender_stein.assets as assets_mod
     from rollender_stein.assets import ingest_yahoo_asset
 
     fake = pd.DataFrame(
         {
-            "trade_date": pd.to_datetime(["2024-01-02", "2024-01-03"]),
-            "close": [101.0, 100.0],
-            "adj_close": [99.0, 98.0],
+            "trade_date": pd.to_datetime(["2024-01-02"]),
+            "close": [101.0],
+            "adj_close": [99.0],
         }
     )
     monkeypatch.setattr(assets_mod, "fetch_yahoo_ohlcv", lambda *a, **kw: fake)
 
-    n = ingest_yahoo_asset(con, "AAPL", use_adjusted_as_close=True)
-    assert n == 2
-    closes = get_asset_closes(con, "AAPL")
-    # Adj close (TR-equivalent), not raw
-    assert closes.tolist() == [99.0, 98.0]
+    with pytest.warns(DeprecationWarning, match=r"use_adjusted_as_close"):
+        ingest_yahoo_asset(con, "DEPRECATED_TICK", use_adjusted_as_close=True)
+
+    # Both columns present and distinct.
+    adj = get_asset_closes(con, "DEPRECATED_TICK", prefer_adjusted=True)
+    raw = get_asset_closes(con, "DEPRECATED_TICK", prefer_adjusted=False)
+    assert adj.iloc[0] == 99.0
+    assert raw.iloc[0] == 101.0
 
 
-def test_ingest_yahoo_asset_falls_back_to_close_when_adj_all_nan(con, monkeypatch) -> None:
-    """Defensive: if adj_close exists but is all-NaN (some Yahoo edge cases),
-    fall back to raw close rather than overwrite with NaN."""
+def test_get_asset_closes_falls_back_to_close_when_adj_all_nan(con, monkeypatch) -> None:
+    """For futures / crypto where Yahoo doesn't return adj_close, the
+    prefer_adjusted=True path falls back to raw close per row."""
     import rollender_stein.assets as assets_mod
     from rollender_stein.assets import ingest_yahoo_asset
 
@@ -229,10 +237,11 @@ def test_ingest_yahoo_asset_falls_back_to_close_when_adj_all_nan(con, monkeypatc
         }
     )
     monkeypatch.setattr(assets_mod, "fetch_yahoo_ohlcv", lambda *a, **kw: fake)
-    ingest_yahoo_asset(con, "WEIRD_TICK", use_adjusted_as_close=True)
-    closes = get_asset_closes(con, "WEIRD_TICK")
-    # adj_close all NaN → fallback to raw close
-    assert closes.tolist() == [101.0]
+    ingest_yahoo_asset(con, "WEIRD_TICK")
+
+    adj = get_asset_closes(con, "WEIRD_TICK", prefer_adjusted=True)
+    # adj_close NaN → fall back to raw close
+    assert adj.tolist() == [101.0]
 
 
 # ----- build_pipeline_for_asset: end-to-end orchestration ---------------------

@@ -41,7 +41,8 @@ src/rollender_stein/
 ├── bitemporal.py            # DuckDB schema, open_db, insert_*, migrations
 ├── locf.py                  # forward_fill_to_calendar() — Phase 2
 ├── config.py                # .env loader (FRED_API_KEY, EIA_API_KEY)
-├── valuation.py             # build_division_array — Phase 5
+├── valuation.py             # build_division_array — Phase 5 (per-share)
+├── marketcap.py             # build_market_cap_division — Phase 5b (whole-company)
 ├── dashboard.py             # Plotly 3D figure (static + animated) — Phase 6
 ├── audit.py                 # truncation_hash_audit — Phase 7
 ├── assets.py                # ingest_yahoo_asset + build_pipeline_for_asset
@@ -50,13 +51,43 @@ src/rollender_stein/
 ├── io/
 │   ├── fred.py              # FRED + ALFRED clients + PUBLICATION_LAG_BD
 │   ├── eia.py               # EIA petroleum spot client
-│   └── yahoo.py             # yfinance wrappers (history + OHLCV)
+│   ├── yahoo.py             # yfinance wrappers (history + OHLCV)
+│   └── sec_edgar.py         # SEC EDGAR companyfacts client (shares outstanding)
 └── numeraires/
     ├── time.py              # N_Time = AHETPI / AHETPI(T0) * 100
     ├── liquidity.py         # N_Liq = Global Fiat Ocean (US+EZ+JP)
     ├── energy.py            # N_Energy = Brent → MWh (floor $0.10)
     └── gold.py              # N_Gold = raw GC=F (Kalman is diagnostic only)
 ```
+
+## Two valuation layers
+
+The AVE provides two parallel views for any individual asset, answering two
+distinct questions:
+
+1. **Per-share** (default): `valuation.build_division_array` measures one
+   share's purchasing power in T0-deflated USD using yfinance's
+   dividend+split-adjusted close. This is the right view for an investor
+   holding a fixed number of shares — dividends and splits are baked in
+   correctly. Output: `data/derived/divisions/{TICKER}.parquet`.
+
+2. **Market cap** (whole company): `marketcap.build_market_cap_division` uses
+   `raw_shares × yfinance_close` (with shares back-adjusted for cumulative
+   future splits to match yfinance's price basis). This measures the
+   company's TOTAL purchasing power — separates real wealth creation from
+   buyback / issuance effects. Requires `ingest_sec_shares(ticker, ...)` to
+   pull share history from SEC EDGAR's companyfacts API.
+
+The diagnostic `marketcap.per_share_vs_market_cap_multiplier(con, ticker)`
+returns the ratio. Ratio > 1 indicates buybacks (per-share appreciated more
+than the company's total value); ratio < 1 indicates dilution. AAPL is ~2.0
+(half of its per-share gain came from buybacks); TSLA is ~0.4 (per-share
+underperformed market cap by 2.5x due to dilution).
+
+Coverage: market-cap layer applies only to **US-listed individual stocks**
+that file 10-K/10-Q with the SEC. Indexes, ETFs, futures, crypto, and foreign
+issuers are out of scope (they don't have meaningful "shares outstanding" in
+the same sense). EDGAR's XBRL coverage starts ~2008-2009.
 
 ## Forensic principles (HARD RULES, not preferences)
 
@@ -135,8 +166,19 @@ key. Never commit `.env`. Keys pasted in chat should be rotated.
 from rollender_stein.bitemporal import open_db
 from rollender_stein.assets import ingest_yahoo_asset
 with open_db("data/ave.duckdb") as con:
-    # use_adjusted_as_close=True for individual stocks; False for index TR
-    ingest_yahoo_asset(con, "TICKER", use_adjusted_as_close=True)
+    # Stores BOTH raw close and adj_close. The use_adjusted_as_close
+    # parameter is deprecated — choose at read time via
+    # get_asset_closes(prefer_adjusted=...).
+    ingest_yahoo_asset(con, "TICKER")
+```
+
+**Add the market-cap layer for a stock:**
+```python
+from rollender_stein.marketcap import ingest_sec_shares, build_market_cap
+USER_AGENT = "YourOrg you@example.com"  # SEC fair-access requirement
+with open_db("data/ave.duckdb") as con:
+    ingest_sec_shares(con, "AAPL", USER_AGENT)
+    mc = build_market_cap(con, "AAPL")  # daily market cap in current-basis USD
 ```
 
 **Re-dump everything after data changes:**

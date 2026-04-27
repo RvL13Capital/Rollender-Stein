@@ -36,25 +36,34 @@ def ingest_yahoo_asset(
     ticker: str,
     *,
     start: str = "1990-01-01",
-    use_adjusted_as_close: bool = False,
+    use_adjusted_as_close: bool | None = None,
 ) -> int:
     """Pull ``ticker`` OHLCV from Yahoo and persist into ``asset_price``.
 
     Idempotent: re-running replaces rows on (series_id, trade_date).
 
-    ``use_adjusted_as_close``: when True, the dividend+split-adjusted close
-    (Yahoo's "Adj Close") is stored in the ``close`` column. The rest of the
-    pipeline (``get_asset_closes`` → ``build_division_array``) reads ``close``,
-    so this is how individual stocks get total-return treatment per the AVE
-    spec's "must use TR for equities" rule. For pre-TR indexes like ``^SP500TR``
-    or for non-dividend assets like ``BTC-USD`` / futures, leave False.
+    Stores BOTH raw close (in ``close``) AND dividend+split-adjusted close
+    (in ``adj_close``). Consumers choose which to read via
+    ``get_asset_closes(prefer_adjusted=...)``:
+      - per-share absolute valuation (TR for equities) → ``prefer_adjusted=True``
+        (the default)
+      - market-cap absolute valuation → ``prefer_adjusted=False`` (raw close
+        x raw shares is the only correct numerator)
+
+    ``use_adjusted_as_close`` was removed in the market-cap refactor. The
+    parameter is accepted but ignored, with a DeprecationWarning if a value
+    is passed. Both columns are always stored.
     """
+    if use_adjusted_as_close is not None:
+        import warnings
+        warnings.warn(
+            "use_adjusted_as_close is deprecated; ingest_yahoo_asset now "
+            "always stores both raw close and adj_close. Use "
+            "get_asset_closes(prefer_adjusted=...) to choose at read time.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
     rows = fetch_yahoo_ohlcv(ticker, start=start)
-    if use_adjusted_as_close and "adj_close" in rows.columns:
-        adj = rows["adj_close"]
-        if adj.notna().any():
-            rows = rows.copy()
-            rows["close"] = adj
     return insert_asset_prices(con, ticker, rows, source="YAHOO")
 
 
