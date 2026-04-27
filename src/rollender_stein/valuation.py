@@ -76,7 +76,9 @@ def build_division_array(
     if t0_date not in nominal_asset_usd.index:
         # Allow asset to have a slightly different calendar — find the latest
         # value at or before T0.
-        loc = nominal_asset_usd.index.get_indexer([t0_date], method="ffill")[0]
+        loc = nominal_asset_usd.index.get_indexer(
+            pd.DatetimeIndex([t0_date]), method="ffill"
+        )[0]
         if loc < 0:
             raise RuntimeError(
                 f"asset has no value at or before T0 ({t0_date.date()}); "
@@ -105,7 +107,9 @@ def build_division_array(
     def _ratio(num: pd.Series | None) -> pd.Series | None:
         if num is None:
             return None
-        return ((indexed / num.reindex(base_idx)) * 100.0).rename(num.name or "asset_in_X")
+        ratio: pd.Series = (indexed / num.reindex(base_idx)) * 100.0
+        out_name = str(num.name) if num.name is not None else "asset_in_X"
+        return ratio.rename(out_name)
 
     return DivisionArray(
         nominal_usd=nominal_aligned.rename("nominal_usd"),

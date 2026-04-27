@@ -158,6 +158,8 @@ def build_phase_space_figure(
     if marker_scale is None:
         marker_scale = max(float(df["nominal_usd"].median()) / 10.0, 1.0)
 
+    if not isinstance(df.index, pd.DatetimeIndex):
+        raise TypeError("DivisionArray frame must have a DatetimeIndex")
     time_numeric = df.index.astype("int64").to_numpy() / 1e9
     sizes = (df["nominal_usd"] / marker_scale).clip(lower=2, upper=40).to_numpy()
     customdata = _customdata_array(df)

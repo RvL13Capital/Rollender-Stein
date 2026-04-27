@@ -20,7 +20,13 @@ DEFAULT_REALTIME_START = "1990-01-01"
 
 
 class _RequestsLike(Protocol):
-    def get(self, url: str, params: dict[str, Any], timeout: float) -> Any: ...
+    def get(
+        self,
+        url: str,
+        *,
+        params: dict[str, Any] = ...,
+        timeout: float = ...,
+    ) -> Any: ...
 
 
 def fetch_alfred_first_release(
@@ -145,12 +151,15 @@ def fetch_fred_observations(
         "observation_end": observation_end,
     }
 
+    sess: _RequestsLike
     if session is None:
         import requests
 
-        session = requests.Session()
+        sess = requests.Session()
+    else:
+        sess = session
 
-    resp = session.get(f"{FRED_BASE}/series/observations", params=params, timeout=timeout)
+    resp = sess.get(f"{FRED_BASE}/series/observations", params=params, timeout=timeout)
     resp.raise_for_status()
     payload = resp.json()
 

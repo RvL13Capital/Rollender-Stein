@@ -92,7 +92,8 @@ def extend_levels_with_growth(
     extended_values = last_level * factors
 
     extension = pd.Series(extended_values, index=forward.index, name=levels.name)
-    return pd.concat([levels.dropna(), extension]).sort_index()
+    out: pd.Series = pd.concat([levels.dropna(), extension]).sort_index()
+    return out
 
 
 def _stream_to_indexed_series(
@@ -158,12 +159,13 @@ def build_n_liq(
 
     if T0_DATE not in ocean_usd.index:
         raise RuntimeError(f"calendar does not contain T0 ({T0_DATE.date()})")
-    anchor = ocean_usd.loc[T0_DATE]
-    if not np.isfinite(anchor) or anchor == 0:
+    anchor_raw = ocean_usd.loc[T0_DATE]
+    if not np.isfinite(anchor_raw) or anchor_raw == 0:
         raise RuntimeError(
-            f"Global_Fiat_Ocean at T0 is {anchor!r}; cannot index. "
+            f"Global_Fiat_Ocean at T0 is {anchor_raw!r}; cannot index. "
             "All four inputs (US M2, EZ M3, JP M3, EURUSD, USDJPY) must have a "
             "release_date <= T0 for the anchor to be defined."
         )
-
-    return (ocean_usd / anchor * 100.0).rename("N_Liq")
+    anchor = float(anchor_raw)
+    n_liq: pd.Series = ocean_usd / anchor * 100.0
+    return n_liq.rename("N_Liq")

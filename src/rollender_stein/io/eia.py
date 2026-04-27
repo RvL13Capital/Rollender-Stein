@@ -20,7 +20,13 @@ PAGE_SIZE = 5000
 
 
 class _RequestsLike(Protocol):
-    def get(self, url: str, params: dict[str, Any], timeout: float) -> Any: ...
+    def get(
+        self,
+        url: str,
+        *,
+        params: dict[str, Any] = ...,
+        timeout: float = ...,
+    ) -> Any: ...
 
 
 def fetch_eia_petroleum_spot(
@@ -48,10 +54,13 @@ def fetch_eia_petroleum_spot(
     if end is None:
         end = "2099-12-31"
 
+    sess: _RequestsLike
     if session is None:
         import requests
 
-        session = requests.Session()
+        sess = requests.Session()
+    else:
+        sess = session
 
     all_rows: list[dict[str, Any]] = []
     offset = 0
@@ -69,7 +78,7 @@ def fetch_eia_petroleum_spot(
             "offset": offset,
             "length": PAGE_SIZE,
         }
-        resp = session.get(
+        resp = sess.get(
             f"{EIA_BASE}/petroleum/pri/spt/data/",
             params=params,
             timeout=timeout,

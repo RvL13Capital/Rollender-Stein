@@ -87,7 +87,7 @@ def fetch_yahoo_history(
         )
 
     idx = df.index
-    if getattr(idx, "tz", None) is not None:
+    if isinstance(idx, pd.DatetimeIndex) and idx.tz is not None:
         idx = idx.tz_localize(None)
 
     out = pd.DataFrame(

@@ -42,6 +42,8 @@ dev = [
     "pytest-cov>=5.0",
     "ruff>=0.5",
     "mypy>=1.10",
+    "pandas-stubs>=2.2",
+    "types-requests>=2.32",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -63,3 +65,21 @@ addopts = "-ra"
 python_version = "3.12"
 strict = true
 files = ["src", "tests"]
+
+# Third-party libraries without stubs — silence rather than litter the codebase
+# with `# type: ignore[import-untyped]`. Plotly's stubs are third-party + partial;
+# statsmodels has no stubs at all; yfinance + pandas_market_calendars + duckdb +
+# fredapi + dotenv likewise. We type our own boundaries (Protocol for sessions,
+# Series/DataFrame for return values) and accept that calls into these modules
+# return Any.
+[[tool.mypy.overrides]]
+module = [
+    "plotly.*",
+    "statsmodels.*",
+    "yfinance.*",
+    "pandas_market_calendars.*",
+    "duckdb.*",
+    "fredapi.*",
+    "dotenv.*",
+]
+ignore_missing_imports = true

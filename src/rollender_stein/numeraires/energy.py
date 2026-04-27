@@ -68,11 +68,12 @@ def build_n_energy(
 
     if T0_DATE not in mwh_cost.index:
         raise RuntimeError(f"calendar does not contain T0 ({T0_DATE.date()})")
-    anchor = mwh_cost.loc[T0_DATE]
-    if pd.isna(anchor) or anchor == 0:
+    anchor_raw = mwh_cost.loc[T0_DATE]
+    if pd.isna(anchor_raw) or anchor_raw == 0:
         raise RuntimeError(
-            f"MWh cost at T0 ({T0_DATE.date()}) is {anchor!r}; cannot index. "
+            f"MWh cost at T0 ({T0_DATE.date()}) is {anchor_raw!r}; cannot index. "
             "Ensure the Brent ingest covers a release on or before T0."
         )
-
-    return (mwh_cost / anchor * 100.0).rename("N_Energy")
+    anchor = float(anchor_raw)
+    n_energy: pd.Series = mwh_cost / anchor * 100.0
+    return n_energy.rename("N_Energy")

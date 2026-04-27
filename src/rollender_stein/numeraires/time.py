@@ -12,6 +12,8 @@ typical ~5-week lag from reference month-end to release.
 
 from __future__ import annotations
 
+from typing import cast
+
 import duckdb
 import pandas as pd
 
@@ -59,11 +61,11 @@ def build_n_time(
 
     if T0_DATE not in daily.index:
         raise RuntimeError(f"calendar does not contain T0 ({T0_DATE.date()})")
-    anchor = daily.loc[T0_DATE, "ahetpi"]
-    if pd.isna(anchor) or anchor == 0:
+    anchor_raw = cast(float, daily.loc[T0_DATE, "ahetpi"])
+    if pd.isna(anchor_raw) or anchor_raw == 0:
         raise RuntimeError(
-            f"AHETPI at T0 ({T0_DATE.date()}) is {anchor}; cannot index. "
+            f"AHETPI at T0 ({T0_DATE.date()}) is {anchor_raw}; cannot index. "
             "Ensure ingest covered realtime_start <= T0 - ~6 weeks."
         )
-
-    return (daily["ahetpi"] / anchor * 100.0).rename("N_Time")
+    n_time: pd.Series = daily["ahetpi"] / anchor_raw * 100.0
+    return n_time.rename("N_Time")
