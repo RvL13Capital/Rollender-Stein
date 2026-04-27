@@ -35,8 +35,9 @@ import pandas as pd
 from rollender_stein.calendar import T0_DATE
 
 NUMERAIRE_NAMES = ("Time", "Liquidity", "Gold", "Energy")
-# Tolerance for the T0=100 invariant check (audit patch 04).
-_T0_INVARIANT_TOL = 1e-6
+# Default tolerance for the T0=100 invariant check (audit patch 04).
+# Callers can override via build_division_array(t0_invariant_tol=...).
+DEFAULT_T0_INVARIANT_TOL: float = 1e-6
 
 
 @dataclass(frozen=True)
@@ -72,6 +73,7 @@ def build_division_array(
     n_gold: pd.Series | None = None,
     n_energy: pd.Series | None = None,
     t0_date: pd.Timestamp = T0_DATE,
+    t0_invariant_tol: float = DEFAULT_T0_INVARIANT_TOL,
 ) -> DivisionArray:
     """Compute the four-dimensional division array.
 
@@ -87,6 +89,11 @@ def build_division_array(
     ``asset_indexed`` is still computed (asset normalized to 100 at T0 if
     available, else first-valid date) but ONLY for inspection / transparency.
     It is not used in any ``asset_in_X`` calculation.
+
+    ``t0_invariant_tol`` is the absolute tolerance for the audit-patch-04
+    "numéraire = 100 at T0" check. Defaults to 1e-6 (essentially exact). Set
+    higher (e.g. 1e-3) to silence warnings for slightly-off anchors, or
+    to ``float("inf")`` to disable the warning entirely.
     """
     # asset_indexed: still anchor at T0 if available, else first-valid. This is
     # informational only — surface for tests/debugging, not used in division.
@@ -138,7 +145,7 @@ def build_division_array(
                     RuntimeWarning,
                     stacklevel=3,
                 )
-            elif abs(float(v) - 100.0) > _T0_INVARIANT_TOL:
+            elif abs(float(v) - 100.0) > t0_invariant_tol:
                 warnings.warn(
                     f"numéraire {label!r} is {float(v):.4f} at T0 (expected 100.00); "
                     "Asset_in_X is NOT in T0-deflated USD for this axis.",

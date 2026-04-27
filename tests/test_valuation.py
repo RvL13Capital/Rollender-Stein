@@ -189,6 +189,40 @@ def test_warning_fires_when_numeraire_has_no_t0_observation() -> None:
         build_division_array(asset, n_time=n_time)
 
 
+def test_t0_invariant_tol_silences_warning_when_loose() -> None:
+    """A loose tolerance (e.g. 1.0) silences warnings for slightly-off
+    numéraires — useful when a caller knowingly accepts small anchor drift."""
+    import warnings as _w
+
+    dates = [str(T0_DATE.date()), "2010-01-04"]
+    asset = _series([1500.0, 3000.0], dates, "spx")
+    n_liq = _series([99.5, 150.0], dates, "n_liquidity")  # 0.5 off
+
+    # With tight tolerance: warns
+    with pytest.warns(RuntimeWarning, match=r"99\.5"):
+        build_division_array(asset, n_liquidity=n_liq, t0_invariant_tol=1e-6)
+
+    # With loose tolerance (1.0 absolute): silent
+    with _w.catch_warnings():
+        _w.simplefilter("error")  # any warning → error
+        build_division_array(asset, n_liquidity=n_liq, t0_invariant_tol=1.0)
+
+
+def test_t0_invariant_tol_inf_disables_warning() -> None:
+    """``t0_invariant_tol=float('inf')`` disables the value-deviation warning
+    entirely (the NaN-at-T0 and missing-T0 branches still fire — those
+    aren't gated by tol)."""
+    import warnings as _w
+
+    dates = [str(T0_DATE.date()), "2010-01-04"]
+    asset = _series([1500.0, 3000.0], dates, "spx")
+    n_liq = _series([50.0, 150.0], dates, "n_liquidity")  # very far from 100
+
+    with _w.catch_warnings():
+        _w.simplefilter("error")
+        build_division_array(asset, n_liquidity=n_liq, t0_invariant_tol=float("inf"))
+
+
 def test_zero_in_numeraire_produces_nan_not_inf() -> None:
     """Patch 04 division-by-zero guard: a zero in the denominator must
     propagate as NaN, not silent ±inf. This cannot happen on real data

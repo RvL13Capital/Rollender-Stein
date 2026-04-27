@@ -162,18 +162,62 @@ def migrate_publication_lags(con: duckdb.DuckDBPyConnection) -> int:
             lag_bd
         )
 
-        # Atomic transaction: delete the un-lagged rows then insert the
-        # corrected ones. PK is (series_id, reference_date, release_date) and
-        # BDay-offset is monotonic in reference_date so within a single
-        # series no PK collisions occur after the update.
+        # Detect potential PK collisions BEFORE attempting the INSERT.
+        # The pathological case is a series with mixed history (e.g. WM2NS
+        # has both ALFRED rows with release > reference AND live-endpoint
+        # rows with release == reference). When the live-endpoint row's
+        # shifted release_date happens to land on an existing ALFRED
+        # row's release_date, the INSERT would PK-violate. Detect those
+        # rows up front, warn per-collision, and skip them — preserving
+        # the rest of the migration rather than rolling back the whole
+        # series.
+        existing_pks_df = con.execute(
+            """
+            SELECT reference_date, release_date FROM macro_release
+            WHERE series_id = ? AND release_date != reference_date
+            """,
+            [series_id],
+        ).fetchdf()
+        existing_pks: set[tuple[object, object]] = set(
+            zip(
+                pd.to_datetime(existing_pks_df["reference_date"]).dt.date,
+                pd.to_datetime(existing_pks_df["release_date"]).dt.date,
+                strict=True,
+            )
+        )
+        ref_dates = pd.to_datetime(existing["reference_date"]).dt.date
+        new_rel_dates = new_release.dt.date
+        collision_mask = pd.Series(
+            [(r, n) in existing_pks for r, n in zip(ref_dates, new_rel_dates, strict=True)],
+            index=existing.index,
+        )
+        if collision_mask.any():
+            for ref_d, new_d in zip(
+                ref_dates[collision_mask], new_rel_dates[collision_mask], strict=True
+            ):
+                warnings.warn(
+                    f"migrate_publication_lags: PK collision on {series_id} "
+                    f"reference={ref_d}, would-shift-release={new_d} (already "
+                    "exists as a non-migrated row); leaving the un-migrated row "
+                    "in place — re-ingest the series for cleaner state.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+            existing = existing.loc[~collision_mask].reset_index(drop=True)
+            new_release = new_release.loc[~collision_mask].reset_index(drop=True)
+            if existing.empty:
+                continue
+
+        # Atomic transaction: delete the un-lagged rows (only the non-colliding
+        # ones, by reference_date) then insert the shifted ones.
         new_rows = pd.DataFrame(
             {
                 "series_id": series_id,
-                "reference_date": existing["reference_date"],
-                "release_date": new_release.dt.date,
-                "value": existing["value"],
-                "source": existing["source"],
-                "vintage": existing["vintage"],
+                "reference_date": existing["reference_date"].reset_index(drop=True),
+                "release_date": new_release.dt.date.reset_index(drop=True),
+                "value": existing["value"].reset_index(drop=True),
+                "source": existing["source"].reset_index(drop=True),
+                "vintage": existing["vintage"].reset_index(drop=True),
             }
         )
 
@@ -182,10 +226,21 @@ def migrate_publication_lags(con: duckdb.DuckDBPyConnection) -> int:
         cur.register(view_name, new_rows)
         try:
             cur.execute("BEGIN TRANSACTION")
+            # Tightened DELETE: scope to ONLY the reference_dates we are
+            # about to re-insert. This preserves collision-excluded rows
+            # (those whose shifted release_date would clash with an existing
+            # revision row) — leaving them un-migrated rather than orphaning
+            # them. Without this scoping, the broad
+            # ``WHERE release_date = reference_date`` would also delete the
+            # collision rows that we then DON'T re-insert.
             cur.execute(
-                """
+                f"""
                 DELETE FROM macro_release
-                WHERE series_id = ? AND release_date = reference_date
+                WHERE series_id = ?
+                  AND release_date = reference_date
+                  AND reference_date IN (
+                      SELECT reference_date FROM {view_name}
+                  )
                 """,
                 [series_id],
             )

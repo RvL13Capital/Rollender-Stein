@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -163,3 +164,217 @@ def test_save_asset_dashboard_sanitizes_ticker(tmp_path) -> None:
     stub_btc = AssetPipelineResult(ticker="BTC-USD", division=da, figure=_StubFig())  # type: ignore[arg-type]
     p2 = save_asset_dashboard(stub_btc, out_dir=str(tmp_path))
     assert p2.endswith("dashboard_BTC-USD.html")
+
+
+# ----- ingest_yahoo_asset: TR-via-adj-close + idempotency ---------------------
+
+
+def test_ingest_yahoo_asset_uses_close_when_use_adjusted_false(con, monkeypatch) -> None:
+    """Default behavior: store raw close (not adj_close) in the close column.
+    For ^SP500TR or BTC-USD this is correct (TR built-in / no dividends)."""
+    import rollender_stein.assets as assets_mod
+    from rollender_stein.assets import ingest_yahoo_asset
+
+    fake = pd.DataFrame(
+        {
+            "trade_date": pd.to_datetime(["2024-01-02", "2024-01-03"]),
+            "open": [100.0, 101.0],
+            "close": [101.0, 100.0],
+            "adj_close": [99.0, 98.0],
+        }
+    )
+    monkeypatch.setattr(assets_mod, "fetch_yahoo_ohlcv", lambda *a, **kw: fake)
+
+    n = ingest_yahoo_asset(con, "FAKE_TICK", use_adjusted_as_close=False)
+    assert n == 2
+    closes = get_asset_closes(con, "FAKE_TICK")
+    # Raw close, not adjusted
+    assert closes.tolist() == [101.0, 100.0]
+
+
+def test_ingest_yahoo_asset_uses_adj_close_when_use_adjusted_true(con, monkeypatch) -> None:
+    """For individual stocks (TR via dividends), use_adjusted_as_close=True
+    must store adj_close in the close column so the rest of the pipeline
+    treats the asset as TR."""
+    import rollender_stein.assets as assets_mod
+    from rollender_stein.assets import ingest_yahoo_asset
+
+    fake = pd.DataFrame(
+        {
+            "trade_date": pd.to_datetime(["2024-01-02", "2024-01-03"]),
+            "close": [101.0, 100.0],
+            "adj_close": [99.0, 98.0],
+        }
+    )
+    monkeypatch.setattr(assets_mod, "fetch_yahoo_ohlcv", lambda *a, **kw: fake)
+
+    n = ingest_yahoo_asset(con, "AAPL", use_adjusted_as_close=True)
+    assert n == 2
+    closes = get_asset_closes(con, "AAPL")
+    # Adj close (TR-equivalent), not raw
+    assert closes.tolist() == [99.0, 98.0]
+
+
+def test_ingest_yahoo_asset_falls_back_to_close_when_adj_all_nan(con, monkeypatch) -> None:
+    """Defensive: if adj_close exists but is all-NaN (some Yahoo edge cases),
+    fall back to raw close rather than overwrite with NaN."""
+    import rollender_stein.assets as assets_mod
+    from rollender_stein.assets import ingest_yahoo_asset
+
+    fake = pd.DataFrame(
+        {
+            "trade_date": pd.to_datetime(["2024-01-02"]),
+            "close": [101.0],
+            "adj_close": [float("nan")],
+        }
+    )
+    monkeypatch.setattr(assets_mod, "fetch_yahoo_ohlcv", lambda *a, **kw: fake)
+    ingest_yahoo_asset(con, "WEIRD_TICK", use_adjusted_as_close=True)
+    closes = get_asset_closes(con, "WEIRD_TICK")
+    # adj_close all NaN → fallback to raw close
+    assert closes.tolist() == [101.0]
+
+
+# ----- build_pipeline_for_asset: end-to-end orchestration ---------------------
+
+
+@pytest.fixture
+def fully_seeded_con():
+    """In-memory DB seeded with enough realistic data to build all numéraires
+    AND a target asset's price history. Reused for the orchestration tests."""
+    from rollender_stein.bitemporal import (
+        insert_macro_releases as _insert_mr,
+    )
+    from rollender_stein.numeraires.gold import (
+        SERIES_IDS as GOLD_SIDS,
+    )
+    from rollender_stein.numeraires.gold import (
+        SOURCE_FRED,
+        SOURCE_YAHOO,
+    )
+    from rollender_stein.numeraires.liquidity import ALL_SERIES as LIQ_SIDS
+    from rollender_stein.numeraires.time import SERIES_ID as TIME_SID
+
+    with open_db(":memory:") as c:
+        full = pd.bdate_range("1995-01-02", "2010-12-31")
+        n = len(full)
+        monthly = pd.date_range("1995-01-01", "2010-12-01", freq="MS")
+        m = len(monthly)
+
+        # AHETPI (N_Time)
+        _insert_mr(c, TIME_SID, pd.DataFrame({
+            "reference_date": monthly,
+            "release_date":   monthly + pd.Timedelta(days=35),
+            "value": np.linspace(11.0, 19.0, m),
+        }), source="FRED_ALFRED")
+
+        # WM2NS (US M2)
+        weekly = pd.date_range("1995-01-04", "2010-12-31", freq="W-WED")
+        _insert_mr(c, LIQ_SIDS["US_M2"], pd.DataFrame({
+            "reference_date": weekly,
+            "release_date":   weekly + pd.Timedelta(days=10),
+            "value": np.linspace(3000.0, 9000.0, len(weekly)),
+        }), source="FRED")
+
+        for sid_key, lo, hi in [
+            ("EZ_M3_LEVEL", 4_500_000_000_000.0, 9_000_000_000_000.0),
+            ("JP_M3_LEVEL", 600_000_000_000_000.0, 1_200_000_000_000_000.0),
+        ]:
+            _insert_mr(c, LIQ_SIDS[sid_key], pd.DataFrame({
+                "reference_date": monthly,
+                "release_date":   monthly + pd.Timedelta(days=35),
+                "value": np.linspace(lo, hi, m),
+            }), source="FRED")
+        for sid_key, val in [("EZ_M3_GROWTH", 0.3), ("JP_M3_GROWTH", 0.1)]:
+            _insert_mr(c, LIQ_SIDS[sid_key], pd.DataFrame({
+                "reference_date": monthly, "release_date": monthly,
+                "value": [val] * m,
+            }), source="FRED")
+        for sid_key, val in [("EURUSD", 1.10), ("USDJPY", 110.0)]:
+            _insert_mr(c, LIQ_SIDS[sid_key], pd.DataFrame({
+                "reference_date": full, "release_date": full,
+                "value": [val] * n,
+            }), source="FRED")
+
+        _insert_mr(c, "RBRTE", pd.DataFrame({
+            "reference_date": full, "release_date": full,
+            "value": np.linspace(20.0, 70.0, n),
+        }), source="EIA")
+
+        rng = np.random.default_rng(42)
+        _insert_mr(c, GOLD_SIDS["XAU"], pd.DataFrame({
+            "reference_date": full, "release_date": full,
+            "value": 280.0 + np.cumsum(rng.normal(0, 1.0, n)),
+        }), source=SOURCE_YAHOO)
+        tips_dates = full[full >= "2003-01-02"]
+        _insert_mr(c, GOLD_SIDS["TIPS"], pd.DataFrame({
+            "reference_date": tips_dates, "release_date": tips_dates,
+            "value": [2.0] * len(tips_dates),
+        }), source=SOURCE_FRED)
+        _insert_mr(c, GOLD_SIDS["DXY"], pd.DataFrame({
+            "reference_date": full, "release_date": full,
+            "value": [100.0] * n,
+        }), source=SOURCE_FRED)
+        _insert_mr(c, GOLD_SIDS["VIX"], pd.DataFrame({
+            "reference_date": full, "release_date": full,
+            "value": [20.0] * n,
+        }), source=SOURCE_FRED)
+
+        # Target asset
+        asset_dates = pd.bdate_range("2000-01-03", "2010-12-31")
+        insert_asset_prices(c, "TGT", pd.DataFrame({
+            "trade_date": asset_dates,
+            "close": np.linspace(100.0, 1000.0, len(asset_dates)),
+        }), source="UNITTEST")
+
+        yield c
+
+
+def test_build_pipeline_for_asset_returns_division_and_figure(fully_seeded_con) -> None:
+    """End-to-end: build_pipeline_for_asset reads asset closes, builds all 4
+    numéraires, computes the division array, and produces a plotly figure."""
+    import warnings as _w
+
+    from rollender_stein.assets import build_pipeline_for_asset
+
+    with _w.catch_warnings():
+        _w.simplefilter("ignore")  # patch-04 warnings on synthetic numéraires
+        result = build_pipeline_for_asset(
+            fully_seeded_con, "TGT", end=pd.Timestamp("2010-12-31"),
+        )
+    assert result.ticker == "TGT"
+    df = result.division.to_frame()
+    assert "nominal_usd" in df.columns
+    assert "asset_in_time" in df.columns
+    assert "asset_in_gold" in df.columns
+    # Figure has at least one trace.
+    assert len(result.figure.data) >= 1
+
+
+def test_build_pipeline_for_asset_raises_on_unknown_ticker(fully_seeded_con) -> None:
+    from rollender_stein.assets import build_pipeline_for_asset
+
+    with pytest.raises(RuntimeError, match=r"no rows in asset_price"):
+        build_pipeline_for_asset(
+            fully_seeded_con, "DOES_NOT_EXIST", end=pd.Timestamp("2010-12-31"),
+        )
+
+
+def test_build_pipeline_for_asset_animate_flag_produces_animated_figure(
+    fully_seeded_con,
+) -> None:
+    """When animate=True, the resulting figure has frames (otherwise empty)."""
+    import warnings as _w
+
+    from rollender_stein.assets import build_pipeline_for_asset
+
+    with _w.catch_warnings():
+        _w.simplefilter("ignore")
+        static_result = build_pipeline_for_asset(
+            fully_seeded_con, "TGT", end=pd.Timestamp("2010-12-31"), animate=False,
+        )
+        animated_result = build_pipeline_for_asset(
+            fully_seeded_con, "TGT", end=pd.Timestamp("2010-12-31"), animate=True,
+        )
+    assert len(static_result.figure.frames) == 0
+    assert len(animated_result.figure.frames) > 0

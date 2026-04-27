@@ -227,6 +227,84 @@ def test_release_after_reference_validation_message_lists_offending_rows(con) ->
         insert_macro_releases(con, "BAD_SERIES", bad, source="UNITTEST")
 
 
+def test_migrate_publication_lags_warns_on_pk_collision_and_skips(con) -> None:
+    """Pathological case: an un-migrated row's BDay-shifted release_date
+    happens to coincide with an existing revision row's PK. Migration must
+    detect the collision, warn, and leave the un-migrated row in place
+    rather than rolling back or overwriting the revision."""
+    from rollender_stein.bitemporal import migrate_publication_lags
+
+    # DFII10 has lag = 1 BD. Insert two rows for ref=2024-01-15:
+    #   - (release=2024-01-15) → un-migrated; would shift to 2024-01-16
+    #   - (release=2024-01-16) → existing revision row, would collide
+    rows = pd.DataFrame(
+        {
+            "reference_date": pd.to_datetime(["2024-01-15", "2024-01-15"]),
+            "release_date":   pd.to_datetime(["2024-01-15", "2024-01-16"]),
+            "value":          [100.0, 105.0],  # different values
+        }
+    )
+    insert_macro_releases(con, "DFII10", rows, source="FRED")
+
+    with pytest.warns(RuntimeWarning, match=r"PK collision"):
+        n = migrate_publication_lags(con)
+
+    # The colliding row was excluded; nothing else to migrate. n == 0.
+    assert n == 0
+    # Both rows preserved exactly:
+    post = con.execute(
+        "SELECT release_date, value FROM macro_release WHERE series_id='DFII10' "
+        "ORDER BY release_date"
+    ).fetchdf()
+    assert len(post) == 2
+    assert post["value"].tolist() == [100.0, 105.0]
+
+
+def test_migrate_publication_lags_collision_does_not_delete_other_rows(con) -> None:
+    """Mixed batch: one row collides, another doesn't. The non-colliding
+    row migrates correctly; the collision row stays un-migrated. Critically,
+    the collision row must NOT be deleted by the broad DELETE clause."""
+    from rollender_stein.bitemporal import migrate_publication_lags
+
+    # DFII10: ref=2024-01-15 collides (existing row at release=2024-01-16);
+    # ref=2024-02-15 does not collide.
+    rows = pd.DataFrame(
+        {
+            "reference_date": pd.to_datetime(
+                ["2024-01-15", "2024-01-15", "2024-02-15"]
+            ),
+            "release_date":   pd.to_datetime(
+                ["2024-01-15", "2024-01-16", "2024-02-15"]
+            ),
+            "value": [100.0, 105.0, 200.0],
+        }
+    )
+    insert_macro_releases(con, "DFII10", rows, source="FRED")
+
+    with pytest.warns(RuntimeWarning, match=r"PK collision"):
+        migrate_publication_lags(con)
+
+    post = con.execute(
+        "SELECT reference_date, release_date, value FROM macro_release "
+        "WHERE series_id='DFII10' ORDER BY reference_date, release_date"
+    ).fetchdf()
+    # All three rows preserved (collision row not deleted by the tightened DELETE):
+    # - Jan 15 / Jan 15: un-migrated (collision excluded)
+    # - Jan 15 / Jan 16: existing revision
+    # - Feb 15 / Feb 16: migrated successfully (Feb 15 was Thursday, +1 BD = Fri Feb 16)
+    assert len(post) == 3
+    # Specifically: the un-migrated Jan 15 row at release=Jan 15 still exists
+    jan15_at_jan15 = post[
+        (pd.to_datetime(post["reference_date"]) == pd.Timestamp("2024-01-15"))
+        & (pd.to_datetime(post["release_date"]) == pd.Timestamp("2024-01-15"))
+    ]
+    assert len(jan15_at_jan15) == 1, "collision row was incorrectly deleted by migration"
+    # The Feb 15 row was migrated to a non-equal release_date.
+    feb15_rows = post[pd.to_datetime(post["reference_date"]) == pd.Timestamp("2024-02-15")]
+    assert len(feb15_rows) == 1
+    assert pd.to_datetime(feb15_rows["release_date"].iloc[0]) > pd.Timestamp("2024-02-15")
+
+
 def test_migrate_publication_lags_preserves_alfred_anchored_rows(con) -> None:
     """For series like WM2NS with mixed data (some rows from ALFRED with
     legitimate release_date != reference_date, some from live-endpoint with
