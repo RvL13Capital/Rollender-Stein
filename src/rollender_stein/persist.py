@@ -225,6 +225,9 @@ def dump_all_artifacts(
 ) -> dict[str, Any]:
     """Run the full transform and persist everything under ``root``.
 
+    Numéraires are built once and reused across all ``tickers`` — for N tickers
+    this saves O(N) redundant Kalman fits and LOCF passes.
+
     Writes a manifest.json at ``root/manifest.json`` listing every file produced
     with row counts and date ranges, plus the time of generation.
     """
@@ -235,8 +238,30 @@ def dump_all_artifacts(
 
     divisions: dict[str, ArtifactInfo] = {}
     if tickers:
+        # Build numéraires once and reuse — avoids the per-ticker Kalman refit.
+        n_time = build_n_time(con, end=end)
+        n_liq = build_n_liq(con, end=end)
+        n_energy = build_n_energy(con, end=end)
+        n_gold = build_n_gold(con, end=end)
         for ticker in tickers:
-            divisions[ticker] = dump_division_array(con, ticker, end=end, root=root)
+            closes = get_asset_closes(con, ticker, end=end)
+            if closes.empty:
+                raise RuntimeError(
+                    f"no rows in asset_price for {ticker!r}; "
+                    "run ingest_yahoo_asset() first",
+                )
+            da = build_division_array(
+                closes,
+                n_time=n_time,
+                n_liquidity=n_liq,
+                n_gold=n_gold,
+                n_energy=n_energy,
+            )
+            safe = ticker.replace("^", "").replace("=", "-").replace("/", "-")
+            info = _write_frame(
+                da.to_frame(), root / "divisions" / f"{safe}.parquet"
+            )
+            divisions[ticker] = info
 
     manifest: dict[str, Any] = {
         "generated_at": datetime.now(UTC).isoformat(),

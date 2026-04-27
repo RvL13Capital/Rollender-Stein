@@ -36,12 +36,25 @@ def ingest_yahoo_asset(
     ticker: str,
     *,
     start: str = "1990-01-01",
+    use_adjusted_as_close: bool = False,
 ) -> int:
     """Pull ``ticker`` OHLCV from Yahoo and persist into ``asset_price``.
 
     Idempotent: re-running replaces rows on (series_id, trade_date).
+
+    ``use_adjusted_as_close``: when True, the dividend+split-adjusted close
+    (Yahoo's "Adj Close") is stored in the ``close`` column. The rest of the
+    pipeline (``get_asset_closes`` → ``build_division_array``) reads ``close``,
+    so this is how individual stocks get total-return treatment per the AVE
+    spec's "must use TR for equities" rule. For pre-TR indexes like ``^SP500TR``
+    or for non-dividend assets like ``BTC-USD`` / futures, leave False.
     """
     rows = fetch_yahoo_ohlcv(ticker, start=start)
+    if use_adjusted_as_close and "adj_close" in rows.columns:
+        adj = rows["adj_close"]
+        if adj.notna().any():
+            rows = rows.copy()
+            rows["close"] = adj
     return insert_asset_prices(con, ticker, rows, source="YAHOO")
 
 
