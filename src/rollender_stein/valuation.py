@@ -3,14 +3,22 @@
 Given a target asset's daily nominal USD price and the available numéraires,
 compute the four absolute-valuation arrays:
 
-    Asset_indexed(t) = (Asset_USD(t) / Asset_USD(T0)) * 100
-    Asset_in_X(t)    = (Asset_indexed(t) / N_X(t)) * 100
+    Asset_in_X(t) = ( nominal_USD(t) / N_X(t) ) * 100
         for X in {Time, Liquidity, Gold, Energy}
 
-By construction Asset_in_X(T0) == 100.0 whenever both the asset and N_X have
-values at T0. Where N_X is NaN (e.g. N_Gold before 2006-01-03 in our setup),
-the corresponding Asset_in_X is also NaN — the dashboard simply has no Z
-coordinate for those days.
+The numéraires are already T0-anchored (N_X(T0) = 100 by construction), so the
+result has units of **T0-deflated USD**: the asset's value expressed in
+purchasing power equivalent to T0. At T0 itself, Asset_in_X(T0) equals the
+asset's nominal T0 price — NOT 100. This is correct: BTC at $457 in 2014 and
+SPX at $2,002 in 2000 should NOT both enter the phase space at [100, 100, 100],
+because their real values differ by 4×.
+
+The earlier per-asset "index to T0=100 first" step was wrong — it forced every
+asset's trajectory to share the same synthetic origin regardless of nominal
+scale, breaking cross-asset comparison.
+
+``asset_indexed`` is still computed for transparency (asset relative to its T0
+or first-valid value, normalized to 100) but is NOT used in the division.
 
 Forensic rule (spec): for equity targets the input must be a TOTAL RETURN
 series (e.g. ``^SP500TR``); price-only indexes underweight the wealth
@@ -64,40 +72,38 @@ def build_division_array(
 ) -> DivisionArray:
     """Compute the four-dimensional division array.
 
-    ``nominal_asset_usd`` is the raw USD price of the target (NOT pre-indexed).
-    The function indexes it to 100 at ``t0_date`` and produces:
+    ``nominal_asset_usd`` is the raw USD price of the target. The division
+    uses the nominal price directly (NOT pre-indexed to 100), so different
+    assets enter the phase space at their real T0-deflated USD position
+    rather than a synthetic per-asset origin.
 
-      - ``asset_indexed`` : the T0=100 series
-      - one ``asset_in_X`` series per provided numéraire
+    Outputs share the same index — the numéraires' master calendar if any are
+    provided, otherwise the asset's own index — with the asset forward-filled
+    to that calendar.
 
-    All outputs share the same index — the union of asset and numéraire dates,
-    aligned via forward-fill so every numéraire's calendar is honored.
+    ``asset_indexed`` is still computed (asset normalized to 100 at T0 if
+    available, else first-valid date) but ONLY for inspection / transparency.
+    It is not used in any ``asset_in_X`` calculation.
     """
-    if t0_date not in nominal_asset_usd.index:
-        # Try latest value at or before T0 (handles holidays).
+    # asset_indexed: still anchor at T0 if available, else first-valid. This is
+    # informational only — surface for tests/debugging, not used in division.
+    if t0_date in nominal_asset_usd.index:
+        anchor_for_indexed = float(nominal_asset_usd.loc[t0_date])
+    else:
         loc = nominal_asset_usd.index.get_indexer(
             pd.DatetimeIndex([t0_date]), method="ffill"
         )[0]
-        if loc < 0:
-            # Asset doesn't exist at T0 (e.g. BTC-USD pre-2014). Anchor at the
-            # asset's first available date instead. By construction
-            # Asset_in_X(anchor) = (100 / N_X(anchor)) * 100 — i.e. the asset
-            # enters the phase space at its real position in numéraire-units,
-            # not at the [100, 100, 100] origin. Same pattern as N_Gold's
-            # post-T0 anchor.
+        if loc >= 0:
+            anchor_for_indexed = float(nominal_asset_usd.iloc[loc])
+        else:
             first_valid = nominal_asset_usd.first_valid_index()
             if first_valid is None:
                 raise RuntimeError("asset series is entirely empty/NaN")
-            anchor_value = float(nominal_asset_usd.loc[first_valid])
-        else:
-            anchor_value = float(nominal_asset_usd.iloc[loc])
-    else:
-        anchor_value = float(nominal_asset_usd.loc[t0_date])
+            anchor_for_indexed = float(nominal_asset_usd.loc[first_valid])
+    if not pd.notna(anchor_for_indexed) or anchor_for_indexed == 0:
+        raise RuntimeError(f"asset anchor value is {anchor_for_indexed!r}; cannot index")
 
-    if not pd.notna(anchor_value) or anchor_value == 0:
-        raise RuntimeError(f"asset value at T0 is {anchor_value!r}; cannot anchor")
-
-    # Settle on a common calendar — prefer the master calendar implicit in the
+    # Settle on a common calendar — prefer the master calendar from the
     # numéraires; otherwise use the asset's own index.
     base_idx = None
     for n in (n_time, n_liquidity, n_gold, n_energy):
@@ -108,12 +114,13 @@ def build_division_array(
         base_idx = nominal_asset_usd.index
 
     nominal_aligned = nominal_asset_usd.reindex(base_idx, method="ffill")
-    indexed = (nominal_aligned / anchor_value) * 100.0
+    indexed = (nominal_aligned / anchor_for_indexed) * 100.0
 
     def _ratio(num: pd.Series | None) -> pd.Series | None:
         if num is None:
             return None
-        ratio: pd.Series = (indexed / num.reindex(base_idx)) * 100.0
+        # Asset_in_X = (nominal_USD / N_X) * 100 — units are T0-deflated USD.
+        ratio: pd.Series = (nominal_aligned / num.reindex(base_idx)) * 100.0
         out_name = str(num.name) if num.name is not None else "asset_in_X"
         return ratio.rename(out_name)
 
