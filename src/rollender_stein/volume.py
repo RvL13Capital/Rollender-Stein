@@ -75,7 +75,12 @@ def rolling_volume_zscore(
             f"min_periods must be in [2, window={window}], got {min_periods}"
         )
 
-    safe = turnover.replace(0, np.nan)
+    # Vectorised C-level filter: masks zero AND negative turnover in one pass.
+    # Negative turnover is a real edge case — on 2020-04-20, WTI Crude (CL=F)
+    # closed at -$37.63/bbl. close * volume goes negative, np.log(negative)
+    # would emit a RuntimeWarning and produce NaN anyway. `.where(> 0)` is
+    # both faster than `.replace()` and catches that broader pathology.
+    safe = turnover.where(turnover > 0)
     log_t = np.log(safe)
     rolling = log_t.rolling(window=window, min_periods=min_periods)
     mean = rolling.mean()

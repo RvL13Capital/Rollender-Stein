@@ -66,6 +66,29 @@ def test_zscore_warmup_below_min_periods_is_nan() -> None:
     assert pd.notna(z.iloc[4])
 
 
+def test_zscore_handles_negative_turnover_silently() -> None:
+    """WTI Crude Futures (CL=F) closed at -$37.63 on 2020-04-20. With raw
+    close * volume that produces negative turnover; ``np.log(negative)``
+    emits a RuntimeWarning. The ``where(turnover > 0)`` filter masks both
+    zero AND negative turnover in one vectorised pass, so neither warning
+    nor inf reaches downstream consumers."""
+    import warnings as _w
+
+    idx = _bd(50)
+    raw = np.full(50, 1e6, dtype="float64")
+    raw[10] = -5e5  # WTI-style negative turnover day
+    turnover = pd.Series(raw, index=idx)
+
+    with _w.catch_warnings():
+        _w.simplefilter("error")  # any warning becomes a hard fail
+        z = rolling_volume_zscore(turnover, window=20, min_periods=5)
+
+    # Negative day itself is masked to NaN (log of masked NaN propagates).
+    assert pd.isna(z.iloc[10])
+    # No infinity anywhere.
+    assert not np.isinf(z).any()
+
+
 def test_zscore_log_zero_does_not_poison_window() -> None:
     """A single zero-volume day must not zero-out z-scores for the next
     `window` rows. Zeros are masked to NaN before log; rolling skips NaN."""

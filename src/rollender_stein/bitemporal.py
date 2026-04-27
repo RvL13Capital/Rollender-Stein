@@ -552,7 +552,15 @@ def get_asset_volume(
     """
     df = con.execute(sql, params).fetchdf()
     if df.empty:
-        return pd.Series(name=series_id, dtype="float64")
+        # Explicit DatetimeIndex on the empty Series so callers that .align()
+        # against a populated DatetimeIndex series don't blow up on
+        # incompatible index types. Pandas' default RangeIndex would silently
+        # break that assumption for downstream code.
+        return pd.Series(
+            name=series_id,
+            dtype="float64",
+            index=pd.DatetimeIndex([]),
+        )
     s: pd.Series = pd.Series(
         df["volume"].to_numpy(),
         index=pd.DatetimeIndex(df["trade_date"]),

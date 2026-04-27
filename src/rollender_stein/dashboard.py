@@ -161,45 +161,72 @@ def _time_alpha_rgba(time_numeric: np.ndarray, alphas: np.ndarray) -> list[str]:
     only; baking the alpha into RGBA color strings is the documented
     workaround. The line trace continues to use ``colorscale="Viridis"`` over
     the numeric ``time_numeric`` array, so the time gradient stays visible.
+
+    **Caller responsibility — call this exactly once per figure** on the
+    full (subsampled) arrays, then slice the result for animation frames.
+    Per-frame recomputation is O(N²) total work AND would re-normalize
+    ``time_numeric`` against each frame's prefix (not the full sample),
+    which silently shifts the color of every historical marker as the
+    animation plays — a forensic-determinism violation.
     """
+    # Hard guard against silent WebGL crashes: a NaN slipping through to
+    # ``rgba(R, G, B, nan)`` does not error in CSS parsing — the canvas
+    # quietly fails to paint that marker (or the whole trace, depending on
+    # browser). Better to raise loudly here than to ship a broken HTML.
+    if not np.isfinite(alphas).all():
+        raise ValueError(
+            "non-finite values in marker alpha array — would corrupt RGBA "
+            "strings into 'rgba(r, g, b, nan)' and silently fail in WebGL."
+        )
+
     lo = float(time_numeric.min())
     hi = float(time_numeric.max())
     span = hi - lo if hi > lo else 1.0
     normed = (time_numeric - lo) / span
     rgb_strs = sample_colorscale("Viridis", normed.tolist())
-    out: list[str] = []
-    for rgb, a in zip(rgb_strs, alphas, strict=True):
-        # rgb_str like "rgb(68, 1, 84)"
-        body = rgb.removeprefix("rgb(").rstrip(")")
-        out.append(f"rgba({body}, {float(a):.4f})")
-    return out
+    # Plotly's sample_colorscale returns "rgb(R, G, B)" deterministically.
+    # Slicing [4:-1] strips "rgb(" and ")" at C-level — much faster than
+    # `.removeprefix().rstrip()` inside a Python hot loop over thousands of
+    # markers. List-comp is the right shape here (CPython optimises it
+    # better than np.char vectorised string ops for short f-string outputs).
+    return [
+        f"rgba({rgb[4:-1]}, {float(a):.4f})"
+        for rgb, a in zip(rgb_strs, alphas, strict=True)
+    ]
 
 
 def _marker_dict(
     *,
     sizes: np.ndarray,
-    time_numeric: np.ndarray,
+    color_data: np.ndarray | list[str],
     color_range: tuple[float, float],
-    opacity: np.ndarray | float,
+    is_rgba: bool,
+    fallback_opacity: float,
 ) -> dict[str, Any]:
-    """Build the per-frame ``marker=dict(...)`` payload.
+    """Build a single ``marker=dict(...)`` payload from precomputed inputs.
 
-    When ``opacity`` is a per-row array, marker color is encoded as RGBA
-    strings (alpha baked in) — Plotly's only path to per-marker alpha. When
-    it's a scalar, we keep the legacy numeric+colorscale+scalar-opacity
-    approach so behavior is identical for assets without volume.
+    ``color_data`` is whatever the caller decided to pass — either a slice
+    of the precomputed RGBA-string list (when ``is_rgba=True``) or a slice
+    of the numeric ``time_numeric`` array (when ``is_rgba=False``). This
+    function does NO normalisation, NO RGBA computation, NO hot-path
+    string formatting — those happen once in ``build_phase_space_figure``
+    on the full data, then are sliced into frames.
+
+    The split is deliberate: per-frame work is now O(slice-size) data
+    copying only, no recomputation. Pre-fix, every animation frame called
+    ``_time_alpha_rgba`` on its own prefix slice, which (a) was O(N²)
+    cumulative, and (b) re-normalised the Viridis scale against each
+    frame's prefix-min/max, causing every historical marker's hue to
+    shift as the animation extended — a silent forensic-determinism
+    violation.
     """
-    if isinstance(opacity, np.ndarray):
-        return dict(
-            size=sizes,
-            color=_time_alpha_rgba(time_numeric, opacity),
-            opacity=1.0,
-        )
+    if is_rgba:
+        return dict(size=sizes, color=color_data, opacity=1.0)
     return dict(
         size=sizes,
-        color=time_numeric,
+        color=color_data,
         colorscale="Viridis",
-        opacity=opacity,
+        opacity=fallback_opacity,
         showscale=False,
         cmin=color_range[0],
         cmax=color_range[1],
@@ -329,6 +356,23 @@ def build_phase_space_figure(
     color_range = (float(time_numeric.min()), float(time_numeric.max()))
     has_volume = z_sub is not None
 
+    # Pre-compute the marker color array EXACTLY ONCE on the full (subsampled)
+    # data. Animation frames will slice this — they must not recompute, both
+    # for performance (O(N) instead of O(N²)) and for forensic correctness
+    # (per-frame recomputation re-normalises Viridis against each prefix's
+    # min/max, silently shifting historical marker hues). See _marker_dict
+    # docstring for the failure mode.
+    base_colors: np.ndarray | list[str]
+    fallback_opacity: float
+    if isinstance(opacity, np.ndarray):
+        is_rgba = True
+        base_colors = _time_alpha_rgba(time_numeric, opacity)
+        fallback_opacity = _OPACITY_DEFAULT  # unused in rgba branch
+    else:
+        is_rgba = False
+        base_colors = time_numeric
+        fallback_opacity = float(opacity)
+
     if not animate:
         fig = go.Figure(
             go.Scatter3d(
@@ -339,9 +383,10 @@ def build_phase_space_figure(
                 line=dict(color=time_numeric, colorscale="Viridis", width=4),
                 marker=_marker_dict(
                     sizes=sizes,
-                    time_numeric=time_numeric,
+                    color_data=base_colors,
                     color_range=color_range,
-                    opacity=opacity,
+                    is_rgba=is_rgba,
+                    fallback_opacity=fallback_opacity,
                 ),
                 text=text,
                 customdata=customdata,
@@ -366,11 +411,8 @@ def build_phase_space_figure(
 
     def _trace_through(end_inclusive: int) -> go.Scatter3d:
         end = end_inclusive + 1
-        # Opacity slice mirrors the size/color slices. When opacity is the
-        # scalar fallback (no volume), it stays scalar across all frames.
-        opacity_slice: np.ndarray | float = (
-            opacity[:end] if isinstance(opacity, np.ndarray) else opacity
-        )
+        # Pure slicing only — base_colors was precomputed once on the full
+        # arrays. Both list[str] and np.ndarray support [:end] efficiently.
         return go.Scatter3d(
             x=df[x].iloc[:end].to_numpy(),
             y=df[y].iloc[:end].to_numpy(),
@@ -385,9 +427,10 @@ def build_phase_space_figure(
             ),
             marker=_marker_dict(
                 sizes=sizes[:end],
-                time_numeric=time_numeric[:end],
+                color_data=base_colors[:end],
                 color_range=color_range,
-                opacity=opacity_slice,
+                is_rgba=is_rgba,
+                fallback_opacity=fallback_opacity,
             ),
             text=text[:end],
             customdata=customdata[:end],

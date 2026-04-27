@@ -284,6 +284,82 @@ def test_animation_color_arrays_match_frame_lengths() -> None:
         assert all(isinstance(c, str) and c.startswith("rgba(") for c in colors)
 
 
+def test_animation_marker_colors_stable_across_frames() -> None:
+    """Color-drift regression guard. Pre-fix, ``_time_alpha_rgba`` was called
+    inside ``_trace_through`` with each frame's prefix-slice of
+    ``time_numeric``, so it re-normalised the Viridis scale against
+    ``time_numeric[:end].min()/.max()``. Result: a marker at position N had
+    a different RGB color in frame 100 (where it sat near the prefix max)
+    than in frame 6500 (where it sat much earlier in the prefix). The
+    historical past silently shifted color as the future arrived — a
+    forensic-determinism violation.
+
+    The fix precomputes RGBA strings once on the full subsampled array;
+    frames slice the precomputed list. This test asserts that property:
+    a marker at the same position has bit-identical color in every frame
+    that contains it."""
+    da = _toy_division_array_with_volume()
+    fig = build_phase_space_figure(
+        da, x="asset_in_time", y="asset_in_liquidity", z="asset_in_gold",
+        animate=True, frame_step=20, subsample=1,
+    )
+    target_pos = 50
+    colors_seen: set[str] = set()
+    frames_containing_pos = 0
+    for frame in fig.frames:
+        colors = frame.data[0].marker.color
+        if len(colors) > target_pos:
+            colors_seen.add(colors[target_pos])
+            frames_containing_pos += 1
+    assert frames_containing_pos > 5, (
+        "test setup error: target position not present in enough frames"
+    )
+    assert len(colors_seen) == 1, (
+        f"marker at position {target_pos} drifted across {frames_containing_pos} "
+        f"frames — saw {len(colors_seen)} distinct colors instead of 1. "
+        f"This means colorscale is being re-normalised per frame, which "
+        f"silently mutates historical marker hues during animation."
+    )
+
+
+def test_time_alpha_rgba_raises_on_nan_alpha() -> None:
+    """Hard guard against the WebGL silent-fail. A NaN slipping into an
+    alpha value would render as ``rgba(R, G, B, nan)`` — CSS doesn't error,
+    but WebGL canvas fails to paint that marker (or the whole trace,
+    browser-dependent). Better to raise loudly here than to ship a broken
+    HTML the user won't notice until they hover and see nothing."""
+    from rollender_stein.dashboard import _time_alpha_rgba
+
+    time_numeric = np.array([0.0, 1.0, 2.0])
+    alphas_with_nan = np.array([0.5, np.nan, 0.7])
+    with pytest.raises(ValueError, match="non-finite"):
+        _time_alpha_rgba(time_numeric, alphas_with_nan)
+
+    alphas_with_inf = np.array([0.5, np.inf, 0.7])
+    with pytest.raises(ValueError, match="non-finite"):
+        _time_alpha_rgba(time_numeric, alphas_with_inf)
+
+
+def test_time_alpha_rgba_format_is_valid_for_clean_input() -> None:
+    """Clean input must produce well-formed RGBA strings parseable by CSS."""
+    from rollender_stein.dashboard import _time_alpha_rgba
+
+    time_numeric = np.array([0.0, 1.0, 2.0, 3.0])
+    alphas = np.array([0.25, 0.5, 0.75, 1.0])
+    out = _time_alpha_rgba(time_numeric, alphas)
+    assert len(out) == 4
+    for s in out:
+        assert s.startswith("rgba(") and s.endswith(")"), s
+        # rgba(R, G, B, A) — four comma-separated values
+        body = s[5:-1]
+        parts = [p.strip() for p in body.split(",")]
+        assert len(parts) == 4, f"expected 4 components, got {len(parts)} in {s}"
+        # First three are numeric (RGB); last is alpha float
+        for p in parts[:3]:
+            assert p.replace(".", "").replace("-", "").isdigit() or p == "0"
+        assert 0.0 <= float(parts[3]) <= 1.0
+
+
 def test_subsampling_preserves_full_resolution_zscore() -> None:
     """Audit point: opacity must be computed at FULL resolution before
     subsampling, then sliced. This guarantees the rolling-window definition

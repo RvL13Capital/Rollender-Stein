@@ -80,7 +80,11 @@ def test_get_asset_volume_round_trip(con) -> None:
 
 def test_get_asset_volume_returns_empty_for_index_with_no_volume(con) -> None:
     """Indexes (^SP500TR etc.) typically have NULL volume — must round-trip
-    cleanly to an empty Series so the dashboard's coverage check fires."""
+    cleanly to an empty Series so the dashboard's coverage check fires.
+
+    The empty Series must carry a DatetimeIndex (not the pandas-default
+    RangeIndex). Otherwise downstream callers doing ``.align()`` against
+    a populated DatetimeIndex Series would hit incompatible-index errors."""
     rows = pd.DataFrame(
         {
             "trade_date": pd.to_datetime(["2024-01-02", "2024-01-03"]),
@@ -92,6 +96,16 @@ def test_get_asset_volume_returns_empty_for_index_with_no_volume(con) -> None:
     vol = get_asset_volume(con, "INDEX")
     assert vol.empty
     assert vol.dtype == "float64"
+    assert isinstance(vol.index, pd.DatetimeIndex), (
+        f"empty volume Series should carry DatetimeIndex, got {type(vol.index).__name__}"
+    )
+    # And it actually aligns cleanly with a populated DatetimeIndex Series:
+    other = pd.Series(
+        [1.0, 2.0],
+        index=pd.DatetimeIndex(["2024-01-02", "2024-01-03"]),
+    )
+    aligned_vol, _ = vol.align(other, join="outer")
+    assert isinstance(aligned_vol.index, pd.DatetimeIndex)
 
 
 def test_get_asset_volume_filters_out_null_rows(con) -> None:
