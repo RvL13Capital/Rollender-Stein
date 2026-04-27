@@ -108,3 +108,73 @@ def fetch_alfred_first_release(
         .sort_values("reference_date")
         .reset_index(drop=True)
     )
+
+
+def fetch_fred_observations(
+    series_id: str,
+    api_key: str,
+    *,
+    observation_start: str = "1990-01-01",
+    observation_end: str | None = None,
+    timeout: float = 30.0,
+    session: _RequestsLike | None = None,
+) -> pd.DataFrame:
+    """Fetch CURRENT FRED observations (live endpoint, no vintage tracking).
+
+    Use this for daily series where revisions are rare to nonexistent — Treasury
+    yields, market indexes, asset prices like the LBMA gold fix. Two reasons
+    to prefer this over ``fetch_alfred_first_release``:
+
+    1. Some series simply aren't in ALFRED (e.g. ``GOLDPMGBD228NLBM``).
+    2. Daily series with decades of history exceed FRED's per-request vintage
+       limit on ``output_type=4`` (~5000 vintage dates max).
+
+    Returns DataFrame with columns ``reference_date``, ``release_date``,
+    ``value``. Since the live endpoint is not bitemporal, ``release_date`` is
+    set equal to ``reference_date`` — accurate-enough for series that aren't
+    materially revised after publication.
+    """
+    if observation_end is None:
+        observation_end = "9999-12-31"
+
+    params: dict[str, Any] = {
+        "series_id": series_id,
+        "api_key": api_key,
+        "file_type": "json",
+        "observation_start": observation_start,
+        "observation_end": observation_end,
+    }
+
+    if session is None:
+        import requests
+
+        session = requests.Session()
+
+    resp = session.get(f"{FRED_BASE}/series/observations", params=params, timeout=timeout)
+    resp.raise_for_status()
+    payload = resp.json()
+
+    if "observations" not in payload:
+        raise ValueError(
+            f"FRED response missing 'observations' field; got keys: {list(payload)}"
+        )
+
+    if not payload["observations"]:
+        return pd.DataFrame(
+            {
+                "reference_date": pd.Series([], dtype="datetime64[ns]"),
+                "release_date": pd.Series([], dtype="datetime64[ns]"),
+                "value": pd.Series([], dtype="float64"),
+            }
+        )
+
+    df = pd.DataFrame(payload["observations"])
+    df["reference_date"] = pd.to_datetime(df["date"])
+    df["release_date"] = df["reference_date"]
+    df["value"] = pd.to_numeric(df["value"], errors="coerce")
+
+    return (
+        df.loc[df["value"].notna(), ["reference_date", "release_date", "value"]]
+        .sort_values("reference_date")
+        .reset_index(drop=True)
+    )

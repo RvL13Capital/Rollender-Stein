@@ -4,7 +4,7 @@ from unittest.mock import MagicMock
 
 import pandas as pd
 
-from rollender_stein.io.fred import fetch_alfred_first_release
+from rollender_stein.io.fred import fetch_alfred_first_release, fetch_fred_observations
 
 
 def _mock_session(payload: dict) -> MagicMock:
@@ -112,3 +112,34 @@ def test_passes_expected_query_params() -> None:
     assert params["output_type"] == 4
     assert params["realtime_start"] == "1990-01-01"
     assert params["realtime_end"] == "2026-04-27"
+
+
+def test_fetch_fred_observations_sets_release_to_reference() -> None:
+    """For daily-series live-endpoint fetches, release_date == reference_date."""
+    sess = _mock_session(
+        {
+            "observations": [
+                {"date": "2024-01-02", "value": "4.21"},
+                {"date": "2024-01-03", "value": "4.18"},
+                {"date": "2024-01-04", "value": "."},  # missing — must be dropped
+                {"date": "2024-01-05", "value": "4.15"},
+            ],
+        }
+    )
+    df = fetch_fred_observations("DFII10", "key", session=sess)
+
+    assert len(df) == 3
+    assert df["value"].tolist() == [4.21, 4.18, 4.15]
+    assert (df["reference_date"] == df["release_date"]).all()
+
+
+def test_fetch_fred_observations_no_realtime_params() -> None:
+    """Live endpoint must NOT pass realtime_start/end (avoids vintage limit)."""
+    sess = _mock_session({"observations": []})
+    fetch_fred_observations("VIXCLS", "key", session=sess)
+    params = sess.get.call_args.kwargs["params"]
+    assert "realtime_start" not in params
+    assert "realtime_end" not in params
+    assert "output_type" not in params  # default = 1 (current)
+    assert params["observation_start"] == "1990-01-01"
+    assert params["observation_end"] == "9999-12-31"
