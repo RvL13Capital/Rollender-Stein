@@ -102,3 +102,73 @@ def fetch_yahoo_history(
         .sort_values("reference_date")
         .reset_index(drop=True)
     )
+
+
+def fetch_yahoo_ohlcv(
+    ticker: str,
+    *,
+    start: str = "1990-01-01",
+    end: str | None = None,
+    auto_adjust: bool = False,
+    yf_module: _YfinanceLike | None = None,
+) -> pd.DataFrame:
+    """Fetch daily OHLCV history from Yahoo Finance for ``ticker``.
+
+    Returns DataFrame with columns ``trade_date``, ``open``, ``high``, ``low``,
+    ``close``, ``adj_close``, ``volume`` — the schema of ``asset_price``. Use
+    this for target assets (e.g. ``^SP500TR``, ``BTC-USD``) that get persisted
+    in the bitemporal store via ``bitemporal.insert_asset_prices``.
+
+    For Phase 4 gold (``GC=F``) we use ``fetch_yahoo_history`` instead since
+    that one takes the macro_release shape (reference_date / release_date /
+    value) the rest of the numéraire pipeline expects.
+    """
+    if yf_module is None:
+        import yfinance as yf
+
+        yf_module = yf
+
+    df = yf_module.download(
+        ticker, start=start, end=end, auto_adjust=auto_adjust, progress=False
+    )
+    if df.empty:
+        return pd.DataFrame(
+            {
+                "trade_date": pd.Series([], dtype="datetime64[ns]"),
+                "open": pd.Series([], dtype="float64"),
+                "high": pd.Series([], dtype="float64"),
+                "low": pd.Series([], dtype="float64"),
+                "close": pd.Series([], dtype="float64"),
+                "adj_close": pd.Series([], dtype="float64"),
+                "volume": pd.Series([], dtype="float64"),
+            }
+        )
+
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+
+    if "Close" not in df.columns:
+        raise ValueError(
+            f"yfinance returned no Close column for {ticker!r}; got {list(df.columns)}"
+        )
+
+    idx = df.index
+    if isinstance(idx, pd.DatetimeIndex) and idx.tz is not None:
+        idx = idx.tz_localize(None)
+
+    rename_map = {
+        "Open": "open",
+        "High": "high",
+        "Low": "low",
+        "Close": "close",
+        "Adj Close": "adj_close",
+        "Volume": "volume",
+    }
+    out = pd.DataFrame({"trade_date": idx})
+    for src, dst in rename_map.items():
+        if src in df.columns:
+            out[dst] = pd.to_numeric(df[src], errors="coerce").to_numpy()
+        else:
+            out[dst] = pd.NA
+
+    return out.dropna(subset=["close"]).sort_values("trade_date").reset_index(drop=True)

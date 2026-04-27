@@ -121,6 +121,77 @@ def insert_macro_releases(
     return len(df)
 
 
+def insert_asset_prices(
+    con: duckdb.DuckDBPyConnection,
+    series_id: str,
+    rows: pd.DataFrame,
+    *,
+    source: str,
+) -> int:
+    """Idempotently insert daily OHLCV-style rows into ``asset_price``.
+
+    ``rows`` must have ``trade_date``; any of ``open``/``high``/``low``/``close``/
+    ``adj_close``/``volume`` may be omitted (stored as NULL). Existing rows on
+    the (series_id, trade_date) PK are replaced.
+    """
+    if "trade_date" not in rows.columns:
+        raise KeyError("insert_asset_prices: missing required column 'trade_date'")
+
+    optional = ["open", "high", "low", "close", "adj_close", "volume"]
+    df = rows[["trade_date", *[c for c in optional if c in rows.columns]]].copy()
+    for col in optional:
+        if col not in df.columns:
+            df[col] = None
+    df["series_id"] = series_id
+    df["source"] = source
+
+    con.register("_incoming_assets", df)
+    try:
+        con.execute(
+            """
+            INSERT OR REPLACE INTO asset_price
+                (series_id, trade_date, open, high, low, close, adj_close, volume, source)
+            SELECT series_id, trade_date, open, high, low, close, adj_close, volume, source
+            FROM _incoming_assets
+            """,
+        )
+    finally:
+        con.unregister("_incoming_assets")
+    return len(df)
+
+
+def get_asset_closes(
+    con: duckdb.DuckDBPyConnection,
+    series_id: str,
+    *,
+    start: pd.Timestamp | None = None,
+    end: pd.Timestamp | None = None,
+) -> pd.Series:
+    """Read the daily close series for ``series_id`` as a Series indexed by trade_date.
+
+    Empty Series if the series has not been ingested.
+    """
+    where = ["series_id = ?"]
+    params: list[object] = [series_id]
+    if start is not None:
+        where.append("trade_date >= ?")
+        params.append(start.date() if hasattr(start, "date") else start)
+    if end is not None:
+        where.append("trade_date <= ?")
+        params.append(end.date() if hasattr(end, "date") else end)
+    sql = f"""
+        SELECT trade_date, close
+        FROM asset_price
+        WHERE {" AND ".join(where)}
+        ORDER BY trade_date ASC
+    """
+    df = con.execute(sql, params).fetchdf()
+    if df.empty:
+        return pd.Series(name=series_id, dtype="float64")
+    s: pd.Series = df.set_index(pd.DatetimeIndex(df["trade_date"]))["close"]
+    return s.rename(series_id)
+
+
 def latest_release_stream(
     con: duckdb.DuckDBPyConnection,
     series_id: str,

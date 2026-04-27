@@ -62,6 +62,36 @@ def test_anchor_uses_ffill_when_t0_missing() -> None:
     assert da.asset_indexed.loc[T0_DATE] == pytest.approx(100.0)
 
 
+def test_anchor_falls_back_to_first_valid_when_asset_starts_after_t0() -> None:
+    """For assets that don't exist at T0 (e.g. BTC-USD starts 2014), use the
+    asset's first available date as anchor. The trajectory enters phase space
+    at its real position in numéraire-units, not at the [100,100,100] origin."""
+    dates = ["2014-09-17", "2014-09-18", "2024-12-31"]
+    asset = _series([457.33, 424.44, 93000.0], dates, "btc")
+    # N_Time at the asset anchor is, say, 200 (wages doubled since T0).
+    n_time = _series(
+        [200.0, 200.5, 350.0],
+        dates,
+        "N_Time",
+    )
+    da = build_division_array(asset, n_time=n_time)
+    # asset_indexed at first valid = 100.0 (anchor)
+    assert da.asset_indexed.loc[pd.Timestamp("2014-09-17")] == pytest.approx(100.0)
+    # asset_in_time at the anchor = (100 / 200) * 100 = 50
+    assert da.asset_in_time.loc[pd.Timestamp("2014-09-17")] == pytest.approx(50.0)
+    # asset_in_time at end = (100 * 93000/457.33 / 350) * 100 = 5810.x
+    expected = (93000.0 / 457.33) * 100.0 / 350.0 * 100.0
+    assert da.asset_in_time.loc[pd.Timestamp("2024-12-31")] == pytest.approx(expected)
+
+
+def test_anchor_raises_on_entirely_empty_asset() -> None:
+    dates = ["2014-01-01", "2014-01-02"]
+    asset = pd.Series([float("nan"), float("nan")], index=pd.to_datetime(dates))
+    n_time = _series([100.0, 100.0], dates, "N_Time")
+    with pytest.raises(RuntimeError, match="entirely empty"):
+        build_division_array(asset, n_time=n_time)
+
+
 def test_nominal_kept_in_to_frame() -> None:
     dates = [str(T0_DATE.date()), "2010-01-04"]
     asset = _series([1500.0, 3000.0], dates, "spx")

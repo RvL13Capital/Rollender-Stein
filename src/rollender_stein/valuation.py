@@ -74,17 +74,23 @@ def build_division_array(
     aligned via forward-fill so every numéraire's calendar is honored.
     """
     if t0_date not in nominal_asset_usd.index:
-        # Allow asset to have a slightly different calendar — find the latest
-        # value at or before T0.
+        # Try latest value at or before T0 (handles holidays).
         loc = nominal_asset_usd.index.get_indexer(
             pd.DatetimeIndex([t0_date]), method="ffill"
         )[0]
         if loc < 0:
-            raise RuntimeError(
-                f"asset has no value at or before T0 ({t0_date.date()}); "
-                f"earliest is {nominal_asset_usd.index[0].date()}",
-            )
-        anchor_value = float(nominal_asset_usd.iloc[loc])
+            # Asset doesn't exist at T0 (e.g. BTC-USD pre-2014). Anchor at the
+            # asset's first available date instead. By construction
+            # Asset_in_X(anchor) = (100 / N_X(anchor)) * 100 — i.e. the asset
+            # enters the phase space at its real position in numéraire-units,
+            # not at the [100, 100, 100] origin. Same pattern as N_Gold's
+            # post-T0 anchor.
+            first_valid = nominal_asset_usd.first_valid_index()
+            if first_valid is None:
+                raise RuntimeError("asset series is entirely empty/NaN")
+            anchor_value = float(nominal_asset_usd.loc[first_valid])
+        else:
+            anchor_value = float(nominal_asset_usd.iloc[loc])
     else:
         anchor_value = float(nominal_asset_usd.loc[t0_date])
 
