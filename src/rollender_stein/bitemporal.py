@@ -17,7 +17,7 @@ portable to Postgres+Timescale if we ever need horizontal scale.
 
 from __future__ import annotations
 
-import contextlib
+import warnings
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -80,11 +80,24 @@ def open_db(path: Path | str = DEFAULT_DB_PATH) -> Iterator[duckdb.DuckDBPyConne
         con = duckdb.connect(str(p))
     try:
         con.execute(_SCHEMA_DDL)
-        # Idempotent migrations — safe to re-run on every open. Suppressed
-        # so a migration failure does not block opening the DB; since
-        # migrations are idempotent, the next open will retry.
-        with contextlib.suppress(Exception):
+        # Idempotent migrations — safe to re-run on every open. We emit a
+        # warning instead of failing the open, because the migrations are
+        # idempotent and the next open will retry; opening the DB is more
+        # valuable than perfect schema parity. The warning preserves
+        # diagnostic visibility — earlier `contextlib.suppress(Exception)`
+        # silently swallowed migration failures (e.g. the pathological PK
+        # collision when a shifted release_date coincides with an existing
+        # revision row).
+        try:
             migrate_publication_lags(con)
+        except Exception as e:
+            warnings.warn(
+                f"migrate_publication_lags failed during open_db: "
+                f"{type(e).__name__}: {e}. The DB is still usable; "
+                "the migration will retry on next open.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
         yield con
     finally:
         con.close()
