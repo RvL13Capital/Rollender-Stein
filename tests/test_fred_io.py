@@ -84,6 +84,16 @@ def test_empty_observations_returns_typed_empty_frame() -> None:
     assert df["release_date"].dtype == "datetime64[ns]"
 
 
+def test_default_realtime_end_is_max_date_sentinel() -> None:
+    """Regression: FRED rejects realtime_end > FRED's "today" with HTTP 400 when
+    the local clock runs ahead of FRED's. Default must be ``"9999-12-31"`` so we
+    never depend on local-vs-FRED clock alignment."""
+    sess = _mock_session({"observations": []})
+    fetch_alfred_first_release("AHETPI", "key", session=sess)
+    params = sess.get.call_args.kwargs["params"]
+    assert params["realtime_end"] == "9999-12-31"
+
+
 def test_passes_expected_query_params() -> None:
     sess = _mock_session({"observations": []})
     fetch_alfred_first_release(

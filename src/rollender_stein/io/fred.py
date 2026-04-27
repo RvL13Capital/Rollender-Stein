@@ -49,7 +49,9 @@ def fetch_alfred_first_release(
         — guaranteed to capture the most recent pre-T0 release for any series
         published since 1990.
     realtime_end
-        Upper bound on initial-release dates. Default: today.
+        Upper bound on initial-release dates. Default: ``"9999-12-31"``, FRED's
+        sentinel for "include everything available." Avoids 400s from clock-skew
+        between the local machine and FRED servers when local "today" runs ahead.
     timeout
         Per-request timeout in seconds.
     session
@@ -62,7 +64,7 @@ def fetch_alfred_first_release(
     (``"."``) are dropped.
     """
     if realtime_end is None:
-        realtime_end = pd.Timestamp.today().strftime("%Y-%m-%d")
+        realtime_end = "9999-12-31"
 
     params: dict[str, Any] = {
         "series_id": series_id,
