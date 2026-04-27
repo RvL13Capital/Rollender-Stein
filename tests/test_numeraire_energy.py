@@ -31,9 +31,8 @@ def _seed_brent(con, dates: list[str], values: list[float]) -> None:
 
 
 def test_n_energy_is_exactly_100_at_t0(con) -> None:
-    """Brent at T0=2000-01-03 was about $25.55/bbl. The MWh cost is then
-    25.55/1.699 ≈ $15.04, but the floor of $20 kicks in. N_Energy(T0) = 100
-    regardless of the absolute level."""
+    """Brent at T0=2000-01-03 ≈ $25/bbl → MWh ≈ $14.7/MWh, well above the
+    new $0.10 floor. N_Energy(T0) = 100 by construction (anchor / anchor)."""
     _seed_brent(
         con,
         dates=["1999-12-30", "2000-01-03", "2000-01-04"],
@@ -45,20 +44,65 @@ def test_n_energy_is_exactly_100_at_t0(con) -> None:
 
 
 def test_n_energy_applies_mwh_floor(con) -> None:
-    """If raw Brent/1.699 is below $20/MWh, the value is clipped at $20."""
-    # April 2020 collapse: Brent briefly traded near $9-12/bbl. After /1.699
-    # that's ~$5-7/MWh — should clip to $20.
+    """When raw Brent/1.699 falls BELOW the $0.10 floor (synthetic — never
+    observed historically), the floor binds and the daily value is clipped."""
+    # Construct a date with raw value below the new $0.10 floor.
+    # raw = brent/1.699 < 0.10  →  brent < 0.17. Use $0.05/bbl.
+    _seed_brent(
+        con,
+        dates=["1999-12-30", "2000-01-03", "2030-01-02"],
+        values=[40.0, 40.0, 0.05],
+    )
+    n = build_n_energy(con, end=pd.Timestamp("2030-01-15"))
+    # Anchor: 40 / 1.699 = 23.54 (no floor binding at T0)
+    # 2030-01-02 raw: 0.05 / 1.699 = 0.0294 → clipped to 0.10
+    # N_Energy = 0.10 / 23.54 * 100 ≈ 0.4248
+    expected = (MWH_PRICE_FLOOR_USD / (40.0 / BBL_TO_MWH_DIVISOR)) * 100.0
+    assert n.loc[pd.Timestamp("2030-01-02")] == pytest.approx(expected, rel=1e-9)
+
+
+def test_n_energy_does_not_clip_real_april_2020_brent(con) -> None:
+    """The post-patch-03 floor of $0.10 is far below the April 2020 Brent
+    crash value of ~$9/bbl. Verify that 2020-04-21 retains its raw value
+    (no floor binding) under the new floor."""
     _seed_brent(
         con,
         dates=["1999-12-30", "2000-01-03", "2020-04-21"],
-        values=[40.0, 40.0, 9.12],   # T0 normal, COVID collapse
+        values=[25.55, 25.55, 9.12],
     )
-    # T0 raw: 40/1.699 = 23.54 (above floor) → anchor = 23.54
-    # Expected April 2020 value: 9.12/1.699 = 5.37 < 20 → clipped to 20.
-    # N_Energy_April = (20 / 23.54) * 100 ≈ 84.95
     n = build_n_energy(con, end=pd.Timestamp("2020-04-25"))
-    expected = (MWH_PRICE_FLOOR_USD / (40.0 / BBL_TO_MWH_DIVISOR)) * 100.0
+    # raw 9.12 / 1.699 = 5.37, above $0.10 floor → no clip
+    # N_Energy = 5.37 / 15.04 * 100 ≈ 35.7
+    expected = (9.12 / BBL_TO_MWH_DIVISOR) / (25.55 / BBL_TO_MWH_DIVISOR) * 100.0
     assert n.loc[pd.Timestamp("2020-04-21")] == pytest.approx(expected, rel=1e-9)
+
+
+def test_n_energy_warns_when_floor_binds_at_t0(con) -> None:
+    """If a contrived T0 Brent value is below the floor, a RuntimeWarning
+    fires explaining the bias. This guards the audit M-2 condition."""
+    # Synthetic: T0 raw value below $0.10 → floor binds at the anchor
+    _seed_brent(
+        con,
+        dates=["1999-12-30", "2000-01-03"],
+        values=[0.05, 0.05],  # both below $0.17/bbl threshold
+    )
+    with pytest.warns(RuntimeWarning, match="floor.*binds at T0"):
+        build_n_energy(con, end=pd.Timestamp("2000-01-15"))
+
+
+def test_n_energy_floor_does_not_warn_on_real_brent_levels(con) -> None:
+    """The patch-03 floor must NOT warn on any historically observed Brent
+    level. Test the lowest sensible scenario (Brent ~$10/bbl)."""
+    _seed_brent(
+        con,
+        dates=["1999-12-30", "2000-01-03"],
+        values=[10.0, 10.0],
+    )
+    # raw 10/1.699 = 5.88, far above $0.10 — no warning
+    import warnings as _w
+    with _w.catch_warnings():
+        _w.simplefilter("error")  # any warning becomes an error here
+        build_n_energy(con, end=pd.Timestamp("2000-01-15"))
 
 
 def test_n_energy_raises_when_no_data(con) -> None:
