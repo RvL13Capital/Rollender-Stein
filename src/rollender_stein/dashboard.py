@@ -43,14 +43,30 @@ def _scene_layout(x: str, y: str, z: str, df: pd.DataFrame) -> dict:
         yaxis_title=AXIS_LABELS.get(y, y),
         zaxis_title=AXIS_LABELS.get(z, z),
         camera=dict(eye=dict(x=1.6, y=1.6, z=1.2)),
+        # uirevision keeps camera + aspect across frames; without it, Plotly
+        # resets the 3D view on every frame change → the visible "jumping".
+        uirevision="ave-phase-space",
+        aspectmode="cube",
         xaxis=dict(
-            range=_range(x), zeroline=True, zerolinewidth=3, zerolinecolor="red"
+            range=_range(x),
+            autorange=False,
+            zeroline=True,
+            zerolinewidth=3,
+            zerolinecolor="red",
         ),
         yaxis=dict(
-            range=_range(y), zeroline=True, zerolinewidth=3, zerolinecolor="red"
+            range=_range(y),
+            autorange=False,
+            zeroline=True,
+            zerolinewidth=3,
+            zerolinecolor="red",
         ),
         zaxis=dict(
-            range=_range(z), zeroline=True, zerolinewidth=3, zerolinecolor="red"
+            range=_range(z),
+            autorange=False,
+            zeroline=True,
+            zerolinewidth=3,
+            zerolinecolor="red",
         ),
     )
 
@@ -254,6 +270,7 @@ def build_phase_space_figure(
         title=title,
         scene=_scene_layout(x, y, z, df),
         template="plotly_dark",
+        uirevision="ave-phase-space",
         updatemenus=[
             {
                 "type": "buttons",
