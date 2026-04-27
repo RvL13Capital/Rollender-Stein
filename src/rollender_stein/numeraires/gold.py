@@ -155,6 +155,14 @@ def fit_gold_model(
         initialization="approximate_diffuse",
     )
     results = model.fit(disp=disp)
+    # Audit patch 05: surface MLE convergence failures rather than silently
+    # returning a fit at a non-optimum. The 'converged' key is set by
+    # statsmodels' wrapper around scipy.optimize; default True to allow
+    # statsmodels versions that do not expose it.
+    if not bool(results.mle_retvals.get("converged", True)):
+        raise RuntimeError(
+            f"gold-model MLE did not converge: {results.mle_retvals!r}"
+        )
     filtered = pd.Series(
         np.asarray(results.filtered_state[0]),
         index=clean.index,

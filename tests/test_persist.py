@@ -227,3 +227,67 @@ def test_dump_division_array_raises_for_missing_asset(seeded_con, tmp_path) -> N
             seeded_con, "DOES_NOT_EXIST",
             end=pd.Timestamp("2010-12-31"), root=tmp_path,
         )
+
+
+# ----- Audit patch 05: caching --------------------------------------------------
+
+
+def test_dump_kalman_outputs_uses_precomputed_fit(seeded_con, tmp_path) -> None:
+    """Audit patch 05: dump_kalman_outputs must accept a precomputed fit and
+    not refit. The returned filtered_state must match the fit's filtered_state."""
+    from rollender_stein.numeraires.gold import assemble_panel, fit_gold_model
+    from rollender_stein.persist import dump_kalman_outputs
+
+    panel = assemble_panel(seeded_con, end=pd.Timestamp("2010-12-31"))
+    fit = fit_gold_model(panel)
+
+    info = dump_kalman_outputs(
+        seeded_con, end=pd.Timestamp("2010-12-31"), root=tmp_path, fit=fit
+    )
+    fs = pd.read_parquet(info["filtered_state"].path)
+    assert len(fs) == len(fit.filtered_state)
+    # First and last filtered values match.
+    assert fs["mu_t"].iloc[0] == pytest.approx(float(fit.filtered_state.iloc[0]))
+    assert fs["mu_t"].iloc[-1] == pytest.approx(float(fit.filtered_state.iloc[-1]))
+
+
+def test_dump_phase4_panel_uses_precomputed_panel(seeded_con, tmp_path) -> None:
+    """Audit patch 05: dump_phase4_panel must accept a precomputed panel."""
+    from rollender_stein.numeraires.gold import assemble_panel
+    from rollender_stein.persist import dump_phase4_panel
+
+    panel = assemble_panel(seeded_con, end=pd.Timestamp("2010-12-31"))
+    info = dump_phase4_panel(
+        seeded_con, end=pd.Timestamp("2010-12-31"), root=tmp_path, panel=panel
+    )
+    on_disk = pd.read_parquet(info.path)
+    pd.testing.assert_frame_equal(on_disk, panel, check_freq=False)
+
+
+def test_dump_all_artifacts_caches_kalman_fit(seeded_con, tmp_path, monkeypatch) -> None:
+    """Audit patch 05: dump_all_artifacts must call fit_gold_model exactly
+    ONCE per invocation, regardless of how many tickers are passed.
+
+    Pre-patch behavior was to refit inside dump_kalman_outputs in addition
+    to whatever build_n_gold did internally — multiple full MLEs per run.
+    """
+    import rollender_stein.persist as persist_mod
+    call_count = [0]
+    original_fit = persist_mod.fit_gold_model
+
+    def counting_fit(*args, **kwargs):
+        call_count[0] += 1
+        return original_fit(*args, **kwargs)
+
+    monkeypatch.setattr(persist_mod, "fit_gold_model", counting_fit)
+
+    persist_mod.dump_all_artifacts(
+        seeded_con,
+        tickers=["TEST_ASSET"],
+        end=pd.Timestamp("2010-12-31"),
+        root=tmp_path,
+    )
+    assert call_count[0] == 1, (
+        f"fit_gold_model must be called exactly once per dump_all_artifacts; "
+        f"got {call_count[0]} calls"
+    )

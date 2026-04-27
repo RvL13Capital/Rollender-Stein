@@ -34,6 +34,7 @@ from rollender_stein.calendar import T0_DATE
 from rollender_stein.numeraires.energy import build_n_energy
 from rollender_stein.numeraires.gold import (
     EXOG_COLS,
+    GoldFit,
     assemble_panel,
     build_n_gold,
     fit_gold_model,
@@ -118,10 +119,16 @@ def dump_phase4_panel(
     *,
     end: pd.Timestamp | None = None,
     root: Path = DEFAULT_DERIVED_ROOT,
+    panel: pd.DataFrame | None = None,
 ) -> ArtifactInfo:
-    """Write the assembled XAU/TIPS/DXY/VIX panel — the input to the Kalman fit."""
+    """Write the assembled XAU/TIPS/DXY/VIX panel — the input to the Kalman fit.
+
+    ``panel`` may be passed precomputed (audit patch 05 caching) to avoid
+    a redundant ``assemble_panel`` call when used inside ``dump_all_artifacts``.
+    """
     _ensure_dirs(root)
-    panel = assemble_panel(con, end=end)
+    if panel is None:
+        panel = assemble_panel(con, end=end)
     return _write_frame(panel, root / "panels" / "kalman_panel.parquet")
 
 
@@ -130,6 +137,7 @@ def dump_kalman_outputs(
     *,
     end: pd.Timestamp | None = None,
     root: Path = DEFAULT_DERIVED_ROOT,
+    fit: GoldFit | None = None,
 ) -> dict[str, ArtifactInfo | str]:
     """Write the Kalman filtered state, residuals, and MLE parameters.
 
@@ -137,10 +145,15 @@ def dump_kalman_outputs(
       - kalman/filtered_state.parquet : mu_t (latent "true core gold")
       - kalman/residuals.parquet      : y_t - mu_t - beta . x_t (one-step-ahead)
       - kalman/params.json            : MLE param vector + log-likelihood
+
+    ``fit`` may be passed precomputed (audit patch 05 caching) to avoid the
+    full assemble_panel + fit_gold_model cycle when ``dump_all_artifacts``
+    has already done it. If None, computes from scratch.
     """
     _ensure_dirs(root)
-    panel = assemble_panel(con, end=end)
-    fit = fit_gold_model(panel)
+    if fit is None:
+        panel = assemble_panel(con, end=end)
+        fit = fit_gold_model(panel)
 
     filtered = fit.filtered_state
     state_info = _write_series(
@@ -232,9 +245,16 @@ def dump_all_artifacts(
     with row counts and date ranges, plus the time of generation.
     """
     _ensure_dirs(root)
+    # Audit patch 05: build the assembled panel and fit the Kalman model
+    # ONCE, then thread them through to the dump_* helpers that need them.
+    # Previously these were recomputed inside each helper, costing two
+    # full assemble_panel passes plus one MLE fit per dump_all_artifacts call.
+    cached_panel = assemble_panel(con, end=end)
+    cached_fit = fit_gold_model(cached_panel)
+
     numeraires = dump_numeraires(con, end=end, root=root)
-    panel = dump_phase4_panel(con, end=end, root=root)
-    kalman = dump_kalman_outputs(con, end=end, root=root)
+    panel = dump_phase4_panel(con, end=end, root=root, panel=cached_panel)
+    kalman = dump_kalman_outputs(con, end=end, root=root, fit=cached_fit)
 
     divisions: dict[str, ArtifactInfo] = {}
     if tickers:
