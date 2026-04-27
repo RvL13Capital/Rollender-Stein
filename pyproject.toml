@@ -24,6 +24,7 @@ dependencies = [
     "requests>=2.32",
     "pandas-market-calendars>=4.4",
     "duckdb>=1.1",
+    "python-dotenv>=1.0",
 ]
 
 [project.optional-dependencies]
