@@ -224,18 +224,24 @@ def insert_macro_releases(
     df["source"] = source
     df["vintage"] = vintage
 
-    con.register("_incoming", df)
+    # Audit patch 07: per-call cursor + unique view name so concurrent inserts
+    # on the same con do not collide. DuckDB connections are not thread-safe
+    # by design; using cur = con.cursor() gives each call its own statement
+    # context within the shared connection.
+    cur = con.cursor()
+    view_name = f"_incoming_macro_{id(df):x}"
+    cur.register(view_name, df)
     try:
-        con.execute(
-            """
+        cur.execute(
+            f"""
             INSERT OR REPLACE INTO macro_release
                 (series_id, reference_date, release_date, value, source, vintage)
             SELECT series_id, reference_date, release_date, value, source, vintage
-            FROM _incoming
+            FROM {view_name}
             """,
         )
     finally:
-        con.unregister("_incoming")
+        cur.unregister(view_name)
     return len(df)
 
 
@@ -263,18 +269,21 @@ def insert_asset_prices(
     df["series_id"] = series_id
     df["source"] = source
 
-    con.register("_incoming_assets", df)
+    # Audit patch 07: per-call cursor + unique view name (see insert_macro_releases).
+    cur = con.cursor()
+    view_name = f"_incoming_asset_{id(df):x}"
+    cur.register(view_name, df)
     try:
-        con.execute(
-            """
+        cur.execute(
+            f"""
             INSERT OR REPLACE INTO asset_price
                 (series_id, trade_date, open, high, low, close, adj_close, volume, source)
             SELECT series_id, trade_date, open, high, low, close, adj_close, volume, source
-            FROM _incoming_assets
+            FROM {view_name}
             """,
         )
     finally:
-        con.unregister("_incoming_assets")
+        cur.unregister(view_name)
     return len(df)
 
 
