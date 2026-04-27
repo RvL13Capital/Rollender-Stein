@@ -61,3 +61,63 @@ def test_empty_after_dropna_raises() -> None:
     da.asset_in_gold.iloc[:] = np.nan
     with pytest.raises(RuntimeError, match="no rows"):
         build_phase_space_figure(da, x="asset_in_time", y="asset_in_liquidity", z="asset_in_gold")
+
+
+def test_animated_figure_has_chronological_frames() -> None:
+    da = _toy_division_array()
+    fig = build_phase_space_figure(
+        da,
+        x="asset_in_time",
+        y="asset_in_liquidity",
+        z="asset_in_gold",
+        animate=True,
+        frame_step=5,
+        subsample=1,
+    )
+    assert len(fig.frames) > 0
+    # Frame cardinality grows monotonically (we replay a build-up).
+    sizes = [len(frame.data[0].x) for frame in fig.frames]
+    assert all(b >= a for a, b in zip(sizes, sizes[1:])), (
+        f"frame trajectory lengths should be non-decreasing, got {sizes}"
+    )
+    # Frame names are dates in chronological order.
+    names = [frame.name for frame in fig.frames]
+    parsed = pd.to_datetime(names)
+    assert (parsed.to_series().diff().dropna() >= pd.Timedelta(0)).all()
+    # Last frame includes every plotted row.
+    last_size = sizes[-1]
+    assert last_size == len(da.to_frame().dropna(subset=["asset_in_time", "asset_in_liquidity", "asset_in_gold"]))
+
+
+def test_animated_figure_has_play_and_slider() -> None:
+    da = _toy_division_array()
+    fig = build_phase_space_figure(
+        da,
+        x="asset_in_time",
+        y="asset_in_liquidity",
+        z="asset_in_gold",
+        animate=True,
+        frame_step=10,
+    )
+    # Play+Pause buttons configured.
+    assert fig.layout.updatemenus is not None and len(fig.layout.updatemenus) == 1
+    button_labels = [b.label for b in fig.layout.updatemenus[0].buttons]
+    assert any("Play" in lab for lab in button_labels)
+    assert any("Pause" in lab for lab in button_labels)
+    # Slider matches frame count.
+    assert fig.layout.sliders is not None and len(fig.layout.sliders) == 1
+    assert len(fig.layout.sliders[0].steps) == len(fig.frames)
+
+
+def test_static_default_unchanged_when_animate_false() -> None:
+    da = _toy_division_array()
+    fig = build_phase_space_figure(
+        da,
+        x="asset_in_time",
+        y="asset_in_liquidity",
+        z="asset_in_gold",
+        animate=False,
+    )
+    assert not fig.frames
+    assert not fig.layout.updatemenus
+    assert not fig.layout.sliders
