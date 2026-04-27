@@ -11,7 +11,7 @@ result has units of **T0-deflated USD**: the asset's value expressed in
 purchasing power equivalent to T0. At T0 itself, Asset_in_X(T0) equals the
 asset's nominal T0 price — NOT 100. This is correct: BTC at $457 in 2014 and
 SPX at $2,002 in 2000 should NOT both enter the phase space at [100, 100, 100],
-because their real values differ by 4×.
+because their real values differ by 4x.
 
 The earlier per-asset "index to T0=100 first" step was wrong — it forced every
 asset's trajectory to share the same synthetic origin regardless of nominal

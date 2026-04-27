@@ -62,7 +62,7 @@ def test_btc_enters_phase_space_at_real_position_not_synthetic_100() -> None:
 
 def test_two_assets_with_same_first_day_enter_at_proportional_positions() -> None:
     """Cross-asset comparability: if asset A is $1000 and asset B is $1 on the
-    same date, their phase-space entry positions must differ by 1000×."""
+    same date, their phase-space entry positions must differ by 1000x."""
     dates = ["2014-09-17", "2014-09-18"]
     asset_big = _series([1000.0, 1000.0], dates, "big")
     asset_small = _series([1.0, 1.0], dates, "small")
@@ -73,7 +73,7 @@ def test_two_assets_with_same_first_day_enter_at_proportional_positions() -> Non
 
     ratio = da_big.asset_in_time.iloc[0] / da_small.asset_in_time.iloc[0]
     assert ratio == pytest.approx(1000.0), (
-        f"two assets at $1000 vs $1 must enter phase space at 1000× different "
+        f"two assets at $1000 vs $1 must enter phase space at 1000x different "
         f"positions; got ratio {ratio}"
     )
 
