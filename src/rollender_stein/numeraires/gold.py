@@ -34,33 +34,53 @@ import statsmodels.api as sm
 from rollender_stein.bitemporal import insert_macro_releases, latest_release_stream
 from rollender_stein.calendar import master_calendar
 from rollender_stein.io.fred import fetch_fred_observations
+from rollender_stein.io.yahoo import fetch_yahoo_history
 from rollender_stein.locf import forward_fill_to_calendar
 
+# Heterogeneous sources by necessity:
+#   XAU  — yfinance GC=F (gold front-month futures as spot proxy; LBMA was
+#          removed from FRED in 2017 and free LBMA feeds no longer exist).
+#   TIPS — FRED DFII10 (live endpoint; daily, 2003-onward).
+#   DXY  — FRED DTWEXBGS (live endpoint; daily, 2006-onward; replaces the
+#          discontinued DTWEXM).
+#   VIX  — FRED VIXCLS (live endpoint; daily, 1990-onward).
+#
+# Effective Kalman fit window is bottlenecked by DXY at 2006-01-02. N_Gold
+# is anchored at the first available date (≈ 2006-01-02), NOT at T0.
 SERIES_IDS: dict[str, str] = {
-    "XAU": "GOLDPMGBD228NLBM",  # LBMA Gold PM Fix, USD/oz, daily, 1968-on
-    "TIPS": "DFII10",            # 10Y TIPS yield, %, daily, 2003-on
-    "DXY": "DTWEXM",             # Major Currencies Trade-Weighted Dollar, daily, 1973-on
-    "VIX": "VIXCLS",             # CBOE VIX close, daily, 1990-on
+    "XAU": "GC=F",
+    "TIPS": "DFII10",
+    "DXY": "DTWEXBGS",
+    "VIX": "VIXCLS",
 }
 EXOG_COLS = ["TIPS", "DXY", "VIX"]
-SOURCE = "FRED"
+SOURCE_FRED = "FRED"
+SOURCE_YAHOO = "YAHOO"
 
 
 def ingest_gold_inputs(
     con: duckdb.DuckDBPyConnection,
-    api_key: str,
+    fred_api_key: str,
 ) -> dict[str, int]:
-    """Pull XAU + TIPS + DXY + VIX into the bitemporal store from FRED's live endpoint.
+    """Pull all four daily inputs into the bitemporal store.
 
-    These are daily series for which (a) gold isn't in ALFRED at all, and
-    (b) decades of daily yields/VIX exceed FRED's vintage-per-request cap.
-    They aren't materially revised after publication, so the live current
-    values are forensically equivalent to original prints.
+    XAU comes from yfinance; TIPS/DXY/VIX come from FRED's live endpoint.
+    The bitemporal store distinguishes sources via the ``source`` column so
+    we can swap in a paid LBMA feed later without losing audit history.
     """
     counts: dict[str, int] = {}
-    for short, sid in SERIES_IDS.items():
-        rows = fetch_fred_observations(sid, api_key)
-        counts[short] = insert_macro_releases(con, sid, rows, source=SOURCE)
+
+    # FRED inputs
+    for short in ("TIPS", "DXY", "VIX"):
+        sid = SERIES_IDS[short]
+        rows = fetch_fred_observations(sid, fred_api_key)
+        counts[short] = insert_macro_releases(con, sid, rows, source=SOURCE_FRED)
+
+    # Yahoo input (gold)
+    rows = fetch_yahoo_history(SERIES_IDS["XAU"])
+    counts["XAU"] = insert_macro_releases(
+        con, SERIES_IDS["XAU"], rows, source=SOURCE_YAHOO
+    )
     return counts
 
 
