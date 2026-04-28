@@ -49,6 +49,10 @@ src/rollender_stein/
 ├── persist.py               # dump_all_artifacts → data/derived/*
 ├── patterns.py              # z-scores, correlations, Kalman innovation diagnostics
 ├── volume.py                # dollar-turnover + rolling vol z-score (dashboard conviction channel)
+├── runconfig.py             # YAML config dataclass for the background engine
+├── run.py                   # refresh-pipeline orchestrator (RunResult, StepResult)
+├── cli.py                   # `ave refresh` argparse CLI entry point
+├── __main__.py              # `python -m rollender_stein` forwarder
 ├── io/
 │   ├── fred.py              # FRED + ALFRED clients + PUBLICATION_LAG_BD
 │   ├── eia.py               # EIA petroleum spot client
@@ -243,9 +247,54 @@ with open_db("data/ave.duckdb") as con:
 ```python
 from rollender_stein.assets import build_pipeline_for_asset, save_asset_dashboard
 with open_db("data/ave.duckdb") as con:
-    result = build_pipeline_for_asset(con, "BTC-USD", animate=True)
+    result = build_pipeline_for_asset(con, "BTC-USD", animate=True,
+                                      recency_window_days=1825)
     path = save_asset_dashboard(result, suffix="_4axis_animated")
 ```
+
+## Background-engine CLI
+
+The full refresh pipeline (macro ingest → asset ingest → SEC ingest →
+`dump_all_artifacts` → dashboards) is exposed via a single CLI entry-point.
+Per-step error tolerance: a failure in one ticker doesn't kill the run;
+the result summary itemizes successes and errors.
+
+```bash
+# Plan only — no I/O, no DB writes
+ave refresh --config config/refresh.yaml --dry
+
+# Real run — needs FRED_API_KEY + EIA_API_KEY in .env
+ave refresh --config config/refresh.yaml
+
+# Partial runs (CLI flags OR-compose with YAML skip flags)
+ave refresh --config config/refresh.yaml --no-macro --no-sec
+```
+
+Module form (no install needed): `python -m rollender_stein refresh ...`.
+
+Config schema: see [`config/refresh.yaml.example`](config/refresh.yaml.example).
+Only user-specific items are configurable (Yahoo tickers, SEC filers,
+dashboard list). The macro layer (FRED/EIA series IDs) is intentionally
+hardcoded in `numeraires/*.py` — exposing it to YAML would invite silent
+methodological drift.
+
+**Local scheduling** (recommended for the kind of forensic vintage-data
+work AVE does — DB persistence on a stable machine, not ephemeral CI runners):
+
+```cron
+# crontab -e — daily refresh at 22:30 local time, log to data/refresh.log
+30 22 * * 1-5 cd /Users/you/Desktop/Sympathy\ for\ the\ Devil && \
+  .venv/bin/ave refresh --config config/refresh.yaml >> data/refresh.log 2>&1
+```
+
+Or via `launchd` (macOS) or `systemd timer` (Linux) for similar effect.
+
+**GitHub Actions** (`.github/workflows/ci.yml`): runs the three-tool gate
+(pytest + mypy strict + ruff) on every push to `main` and every PR.
+Refresh is intentionally NOT scheduled in Actions because the DuckDB
+file needs persistent storage; ephemeral runners would lose vintage
+history every run. Run refresh locally via cron and push the code; CI
+verifies the code, you keep the data.
 
 ## Known limitations / gaps
 
@@ -257,7 +306,10 @@ with open_db("data/ave.duckdb") as con:
 - **PBOC deliberately excluded.** ~50% of global broad money is out of
   scope by design (see Spec Deviation #4 — China's data is opaque, state-
   managed, CNY-conversion-contaminated). N_Liq is honestly G3, not global.
-- **No CI.** Tests run locally only.
+- **CI is code-only, not data.** GitHub Actions runs the three-tool gate
+  on every push (`.github/workflows/ci.yml`); the refresh pipeline runs
+  locally via cron because the DuckDB needs persistent storage that
+  ephemeral runners don't provide.
 - **Heavy-tailed gold returns.** The Kalman is QMLE; std errors from
   statsmodels are wrong by orders of magnitude (we don't report them).
 - **Plotly 3D animation** is heavy on the browser at high frame counts —

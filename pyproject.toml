@@ -47,6 +47,9 @@ dev = [
     "types-requests>=2.32",
 ]
 
+[project.scripts]
+ave = "rollender_stein.cli:main"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/rollender_stein"]
 
@@ -82,5 +85,6 @@ module = [
     "duckdb.*",
     "fredapi.*",
     "dotenv.*",
+    "yaml",
 ]
 ignore_missing_imports = true

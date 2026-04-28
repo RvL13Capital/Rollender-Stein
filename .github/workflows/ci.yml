@@ -1,0 +1,44 @@
+name: CI
+
+# Three-tool gate (pytest + mypy --strict + ruff) on every push to main and
+# every PR. Replicates the local pre-commit discipline so a regression caught
+# locally is also blocked at the repo level — no green main with red tests.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  three-tool-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies (editable + dev extras)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: pytest
+        run: pytest -q
+
+      - name: mypy --strict
+        run: mypy --strict src
+
+      - name: ruff
+        run: ruff check src tests

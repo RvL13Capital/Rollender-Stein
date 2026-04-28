@@ -1,0 +1,78 @@
+# AVE Refresh Engine — example configuration.
+#
+# Copy this to config/refresh.yaml (or any path of your choice) and run:
+#   ave refresh --config config/refresh.yaml
+#
+# All sections are optional; missing fields fall back to the defaults
+# documented in src/rollender_stein/runconfig.py.
+#
+# The macro-data layer (FRED series IDs for AHETPI, M2/M3, FX, TIPS, DXY,
+# VIX; EIA Brent; Yahoo gold front-month GC=F) is INTENTIONALLY NOT
+# user-configurable. Those are the methodologically load-bearing inputs
+# defined in numeraires/*.py — exposing them as config would let silent
+# methodological drift creep in via YAML edits. If you need to swap one,
+# do it in code where the change is reviewable.
+
+db_path: data/ave.duckdb
+output_dir: data/derived
+
+# Yahoo Finance assets to ingest (yfinance tickers).
+# These get ingested via OHLCV; the per-share absolute valuation runs on
+# all of them. Add/remove freely.
+yahoo:
+  tickers:
+    - AAPL
+    - MSFT
+    - NVDA
+    - GOOGL
+    - AMZN
+    - META
+    - TSLA
+    - BTC-USD
+    - ETH-USD
+    - "^SP500TR"
+    - SPY
+    - QQQ
+    - GLD
+    - SLV
+
+# SEC EDGAR shares-outstanding for the market-cap layer.
+# user_agent is REQUIRED by SEC fair-access policy — set to your org +
+# contact email. The 'filers' list is a subset of yahoo.tickers (only
+# US-listed stocks have meaningful 10-K/10-Q filings).
+sec:
+  user_agent: "RvL13Capital you@example.com"
+  filers:
+    - AAPL
+    - MSFT
+    - NVDA
+    - GOOGL
+    - AMZN
+    - META
+    - TSLA
+
+# Dashboards to render after the refresh.
+# 'recency_window_days=1825' means the last 5 years are full-opacity in
+# the visualisation; older points fade to 'recency_floor=0.10'.
+# Set 'animate: true' for the keyframed time-evolution view (~5-10 MB
+# HTML per asset; 'false' renders a static figure ~300-900 KB).
+dashboards:
+  tickers:
+    - AAPL
+    - BTC-USD
+    - "^SP500TR"
+    - TSLA
+    - NVDA
+  recency_window_days: 1825
+  recency_floor: 0.10
+  animate: false
+
+# Skip flags — useful for partial runs or debugging.
+# (CLI flags --no-macro / --no-assets / --no-sec / --no-dashboards
+#  override these without editing the YAML.)
+skip:
+  macro: false
+  assets: false
+  sec: false
+  dump: false
+  dashboards: false
