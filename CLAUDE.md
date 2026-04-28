@@ -248,6 +248,11 @@ with open_db("data/ave.duckdb") as con:
 - Audit findings: `/Users/vonlinck/Downloads/files/` (if still present) —
   `rollender_stein_audit_pass4_findings.md`,
   `rollender_stein_audit_addendum.md`, `rollender_stein_math_audit.md`.
+- Audit decisions log: [`AUDIT_DECISIONS.md`](AUDIT_DECISIONS.md) — per-
+  finding resolution status (DONE / REWORKED / WON'T FIX) for the
+  step-by-step review at audit baseline `af3956a`. Includes per-finding
+  rationale for each rejected suggestion so future audits don't re-open
+  closed decisions.
 - Commit history is clean and message-rich; `git log` is canonical for
   understanding why each piece exists.
 
