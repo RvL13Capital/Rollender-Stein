@@ -175,6 +175,59 @@ so a future reviewer doesn't re-open the question.
 
 ---
 
+## §6 Causality (Kalman parameter-level look-ahead) — accepted limitation
+
+**The issue.** ``fit_gold_model`` calls ``UnobservedComponents.fit()`` on the
+*entire* panel (2006-01-03 → today). The MLE objective therefore sees all
+observations including future ones; the resulting parameter vector
+``θ̂ = (σ²_level, σ²_irregular, β_TIPS, β_DXY, β_VIX)`` is F_T-measurable.
+At any historical date t < T, the filtered state ``μ_t(θ̂)`` is computed
+from a θ̂ that "knows" the future. Strictly: ``μ_t`` is F_T-measurable,
+not F_t-measurable.
+
+**Why we don't fix it.** Three load-bearing reasons:
+
+1. **Out of pipeline.** Patch 06 made N_Gold = ``raw GC=F / GC=F(2000-08-30) * 100``.
+   The Kalman is no longer on the production path — it lives in
+   ``data/derived/kalman/`` purely as a diagnostic artefact. Anyone using
+   ``filtered_state.parquet`` or ``innovations.parquet`` for trading
+   signals is by definition outside the AVE's documented scope (CLAUDE.md
+   *"the patterns module emits descriptive statistics, not signals"*).
+
+2. **The model is identification-degenerate.** Production ``params.json``
+   shows ``σ²_level / σ²_irregular ≈ 15.5`` — the level random walk
+   absorbs essentially all explanatory power; β_TIPS, β_DXY, β_VIX are
+   near-zero. This is the quantitative confirmation of audit finding
+   10.M-13. **Rolling-MLE on a degenerate model produces unstable
+   degeneracy, not a stable rolling estimate.** Fixing parameter look-
+   ahead without fixing identification would deliver a worse output, not
+   a better one — the parameter estimates would jitter wildly across
+   windows for no informational gain.
+
+3. **Cost-benefit asymmetry.** A correct rolling-MLE implementation
+   requires: window-length decision (rolling? expanding? what length?),
+   refit-cadence decision (daily? monthly? per-rebalance?), parameter-
+   trajectory persistence schema, regression tests against full-sample
+   approximation as a sanity check, and a documented migration for
+   downstream consumers of the persisted artefacts. **Multiple days of
+   work for a feature whose only consumer (N_Gold) doesn't depend on it.**
+
+**What is sufficient.** The Kalman is honestly framed as a Phase-4.5
+diagnostic in CLAUDE.md, ``persist.dump_kalman_outputs``, and
+``patterns.compute_kalman_innovation_diagnostics``. The diagnostic
+metrics that matter (autocorrelation of innovations, recent vs all-time
+variance ratio, in-sigmas-of-recent z-score) are **scale-invariant and
+parameter-stability-robust**, so the param-vs-future-data sin doesn't
+propagate into them in any practically observable way.
+
+**If a future user wants Kalman-driven signals**, the right move is
+not "patch our full-sample fit" but "fork the diagnostic and implement
+a proper expanding-window MLE with explicit refit cadence, plus a
+walk-forward backtest, plus regime-shift detection on the parameter
+trajectory itself". That is its own project and not a maintenance fix.
+
+---
+
 ## P2 calibration baseline — empirical σ-shift after the innovations switch
 
 Finding 15.M-5 / 16.F-Major (commit `bec7a64`) replaced the persisted

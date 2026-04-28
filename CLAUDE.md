@@ -300,9 +300,18 @@ verifies the code, you keep the data.
 
 - **N_Gold T0 gap (8 months).** GC=F starts 2000-08-30; no free spot source
   predates that. Patch-04 warning surfaces this.
-- **Parameter-level look-ahead in Kalman.** MLE fits on the full panel;
-  rolling MLE not implemented. Diagnostic-only since patch 06; if N_Gold
-  ever returns to Kalman-driven, this becomes a real backtest concern.
+- **Parameter-level look-ahead in Kalman (§6 causality, accepted).** MLE
+  fits on the full panel; ``θ̂`` is F_T-measurable, so ``μ_t(θ̂)``
+  technically peeks at the future via the parameter vector. Status:
+  **accepted as a documented limitation, not a defect to be fixed**.
+  Rationale: (a) Kalman is Phase-4.5 diagnostic-only since patch 06,
+  not on the N_Gold pipeline path; (b) the model is identification-
+  degenerate (σ²_level/σ²_irregular ≈ 15.5 — see Spec Deviation #6 and
+  AUDIT_DECISIONS.md "§6 Causality"), so rolling-MLE would produce
+  unstable degeneracy, not a cleaner estimate; (c) any future user
+  who wants Kalman-driven *signals* should fork the diagnostic with
+  proper expanding-window MLE + walk-forward backtest, which is its
+  own project.
 - **PBOC deliberately excluded.** ~50% of global broad money is out of
   scope by design (see Spec Deviation #4 — China's data is opaque, state-
   managed, CNY-conversion-contaminated). N_Liq is honestly G3, not global.
