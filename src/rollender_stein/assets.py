@@ -83,6 +83,10 @@ def build_pipeline_for_asset(
     end: pd.Timestamp | None = None,
     animate: bool = False,
     title: str | None = None,
+    recency_window_days: int | None = None,
+    recency_fade_days: int | None = None,
+    recency_floor: float = 0.10,
+    focus_date: pd.Timestamp | None = None,
 ) -> AssetPipelineResult:
     """Run the full Phase 3-6 pipeline for ``ticker``.
 
@@ -134,6 +138,10 @@ def build_pipeline_for_asset(
         z="asset_in_gold",
         title=title or f"AVE: {ticker} Phase-Space Attractor",
         animate=animate,
+        recency_window_days=recency_window_days,
+        recency_fade_days=recency_fade_days,
+        recency_floor=recency_floor,
+        focus_date=focus_date,
     )
     return AssetPipelineResult(ticker=ticker, division=division, figure=figure)
 

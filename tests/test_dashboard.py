@@ -360,6 +360,119 @@ def test_time_alpha_rgba_format_is_valid_for_clean_input() -> None:
         assert 0.0 <= float(parts[3]) <= 1.0
 
 
+# ---------------------------------------------------------------------------
+# Recency-fade overlay
+# ---------------------------------------------------------------------------
+
+
+def test_recency_disabled_by_default_is_unchanged() -> None:
+    """Default behaviour (recency_window_days=None) must produce a figure
+    bit-identical to pre-recency behaviour — backwards compatibility."""
+    da = _toy_division_array_with_volume()
+    fig_a = build_phase_space_figure(
+        da, x="asset_in_time", y="asset_in_liquidity", z="asset_in_gold",
+    )
+    fig_b = build_phase_space_figure(
+        da, x="asset_in_time", y="asset_in_liquidity", z="asset_in_gold",
+        recency_window_days=None,
+    )
+    # Same opacity-derived alpha values (parsed from rgba colors)
+    a = [_alpha_from_rgba(c) for c in fig_a.data[0].marker.color]
+    b = [_alpha_from_rgba(c) for c in fig_b.data[0].marker.color]
+    assert a == b
+
+
+def test_recency_factor_array_basic_schedule() -> None:
+    """Piecewise schedule: focus zone full, transition zone fades, ancient floor."""
+    from rollender_stein.dashboard import _recency_factor_array
+
+    # Hand-computed ages relative to focus 2025-12-31:
+    #   2025-12-31 → 0 days (focus, factor=1.0)
+    #   2025-09-08 → 114 days (in window<=200, factor=1.0)
+    #   2025-03-16 → 290 days (fade: progress=(290-200)/400=0.225, factor≈0.798)
+    #   2023-12-31 → 731 days (ancient: factor=floor=0.10)
+    dates = pd.DatetimeIndex(
+        ["2023-12-31", "2025-03-16", "2025-09-08", "2025-12-31"]
+    )
+    focus = pd.Timestamp("2025-12-31")
+    factor = _recency_factor_array(
+        dates, focus_date=focus, window_days=200, fade_days=400, floor=0.10,
+    )
+    assert factor[3] == pytest.approx(1.0)              # age 0
+    assert factor[2] == pytest.approx(1.0)              # age 114, in window
+    expected_fade = 1.0 - ((290 - 200) / 400) * (1.0 - 0.10)
+    assert factor[1] == pytest.approx(expected_fade, abs=0.01)
+    assert factor[0] == pytest.approx(0.10)             # ancient
+
+
+def test_recency_factor_validation() -> None:
+    from rollender_stein.dashboard import _recency_factor_array
+
+    idx = pd.DatetimeIndex(["2024-01-01", "2024-06-01"])
+    focus = pd.Timestamp("2024-06-01")
+    with pytest.raises(ValueError, match="window_days"):
+        _recency_factor_array(idx, focus_date=focus, window_days=-1, fade_days=10, floor=0.1)
+    with pytest.raises(ValueError, match="fade_days"):
+        _recency_factor_array(idx, focus_date=focus, window_days=10, fade_days=0, floor=0.1)
+    with pytest.raises(ValueError, match="floor"):
+        _recency_factor_array(idx, focus_date=focus, window_days=10, fade_days=10, floor=1.5)
+
+
+def test_recency_fades_old_markers_more_than_recent() -> None:
+    """End-to-end: with recency on, the earliest plotted marker has lower
+    alpha than the latest one. Without recency, the relationship is governed
+    only by the volume z-score (essentially no monotonic trend on synthetic
+    data)."""
+    da = _toy_division_array_with_volume()
+    fig = build_phase_space_figure(
+        da, x="asset_in_time", y="asset_in_liquidity", z="asset_in_gold",
+        recency_window_days=30, recency_fade_days=60, recency_floor=0.10,
+    )
+    alphas = np.array([_alpha_from_rgba(c) for c in fig.data[0].marker.color])
+    # The earliest marker should be near the floor (or below if volume also
+    # contributes a fade); the latest should be in the upper band.
+    assert alphas[0] <= 0.20, f"earliest alpha={alphas[0]:.3f} should be near floor 0.10"
+    assert alphas[-1] >= 0.40, f"latest alpha={alphas[-1]:.3f} should be in focus zone"
+
+
+def test_recency_promotes_scalar_fallback_to_per_marker_array() -> None:
+    """Asset without volume normally renders with scalar opacity 0.7. With
+    recency on, the scalar gets broadcast and decayed → per-marker array."""
+    da = _toy_division_array()  # no volume
+    fig = build_phase_space_figure(
+        da, x="asset_in_time", y="asset_in_liquidity", z="asset_in_gold",
+        recency_window_days=20, recency_fade_days=40, recency_floor=0.05,
+    )
+    marker = fig.data[0].marker
+    # Color now an rgba array (was numeric in the no-volume baseline test)
+    colors = list(marker.color)
+    assert all(isinstance(c, str) and c.startswith("rgba(") for c in colors)
+    alphas = np.array([_alpha_from_rgba(c) for c in colors])
+    # Old end faded
+    assert alphas[0] < alphas[-1]
+    # Recent end at the volume fallback level (0.7) since no volume to modulate
+    assert alphas[-1] == pytest.approx(0.7, abs=0.05)
+
+
+def test_recency_focus_date_can_be_shifted_to_past() -> None:
+    """Focus date defaults to last point but can be set explicitly. Setting
+    it to the middle of the trajectory shifts the bright window backwards."""
+    da = _toy_division_array_with_volume()
+    full = pd.DataFrame(da.to_frame())
+    midpoint = full.index[len(full) // 2]
+    fig = build_phase_space_figure(
+        da, x="asset_in_time", y="asset_in_liquidity", z="asset_in_gold",
+        recency_window_days=10, recency_fade_days=20, recency_floor=0.10,
+        focus_date=midpoint,
+    )
+    alphas = np.array([_alpha_from_rgba(c) for c in fig.data[0].marker.color])
+    text_dates = list(fig.data[0].text)
+    # Marker at midpoint should be bright; first AND last should be faded
+    mid_idx = text_dates.index(midpoint.strftime("%Y-%m-%d"))
+    assert alphas[mid_idx] > alphas[0]
+    assert alphas[mid_idx] > alphas[-1]
+
+
 def test_subsampling_preserves_full_resolution_zscore() -> None:
     """Audit point: opacity must be computed at FULL resolution before
     subsampling, then sliced. This guarantees the rolling-window definition

@@ -46,6 +46,16 @@ _OPACITY_Z_SLOPE = 0.25
 # treated as "we don't yet know how much conviction this represents."
 _OPACITY_WARMUP_FILL_Z = -2.0
 
+# Recency-fade defaults (opt-in via build_phase_space_figure parameters).
+# Composes multiplicatively with the volume-conviction opacity:
+#   final_alpha = volume_alpha * recency_factor
+# So old-low-volume markers vanish, old-high-volume markers stay visible
+# but faded, and recent markers retain their full conviction-based opacity.
+_RECENCY_DEFAULT_FLOOR = 0.10  # opacity floor for ancient-yet-high-conviction points
+# Hard floor on the composed final alpha — prevents fully invisible markers from
+# breaking trajectory continuity. Very low so it doesn't fight the recency floor.
+_FINAL_ALPHA_HARD_FLOOR = 0.02
+
 AXIS_LABELS: dict[str, str] = {
     "asset_in_energy": "Physics (Thermodynamic MWh Value)",
     "asset_in_liquidity": "Printer (Global Systemic M2 Value)",
@@ -233,6 +243,51 @@ def _marker_dict(
     )
 
 
+def _recency_factor_array(
+    index: pd.DatetimeIndex,
+    *,
+    focus_date: pd.Timestamp,
+    window_days: int,
+    fade_days: int,
+    floor: float,
+) -> np.ndarray:
+    """Per-row time-decay weight in ``[floor, 1.0]`` based on age vs ``focus_date``.
+
+    Piecewise-linear schedule (in calendar days, not trading days, so users
+    can reason in human time without converting):
+
+      - age in [0, window_days]            → 1.0       (full focus zone)
+      - age in (window_days, window+fade]  → 1.0 → floor (linear fade)
+      - age >  window + fade               → floor      (ancient-but-visible)
+
+    Computed once on the full index; animation slices propagate through.
+    """
+    if window_days < 0 or fade_days <= 0:
+        raise ValueError(
+            f"window_days must be >= 0 and fade_days > 0, got {window_days}/{fade_days}"
+        )
+    if not (0.0 <= floor <= 1.0):
+        raise ValueError(f"floor must be in [0, 1], got {floor}")
+
+    # numpy datetime arithmetic — bypasses the pandas Timestamp/DatetimeIndex
+    # stub ambiguity, gives an int64 ns array we can convert to days cleanly.
+    idx_ns: np.ndarray = index.to_numpy(dtype="datetime64[ns]")
+    focus_ns = np.datetime64(pd.Timestamp(focus_date), "ns")
+    ages_days: np.ndarray = (focus_ns - idx_ns).astype("int64").astype("float64")
+    ages_days /= 86_400 * 1_000_000_000  # ns → days
+
+    factor: np.ndarray = np.ones_like(ages_days)
+    in_fade = (ages_days > window_days) & (ages_days <= window_days + fade_days)
+    in_ancient = ages_days > window_days + fade_days
+    # Linear fade in the transition zone
+    progress = (ages_days[in_fade] - window_days) / fade_days
+    factor[in_fade] = 1.0 - progress * (1.0 - floor)
+    factor[in_ancient] = floor
+    # Future points (rare; could happen with synthetic test fixtures) stay at 1.0
+    factor[ages_days < 0] = 1.0
+    return factor
+
+
 def _resolve_opacity(df_full: pd.DataFrame) -> tuple[np.ndarray | float, pd.Series | None]:
     """Decide whether to use per-marker opacity from volume z-scores.
 
@@ -278,6 +333,10 @@ def build_phase_space_figure(
     frame_step: int = 21,
     frame_duration_ms: int = 50,
     subsample: int | None = None,
+    recency_window_days: int | None = None,
+    recency_fade_days: int | None = None,
+    recency_floor: float = _RECENCY_DEFAULT_FLOOR,
+    focus_date: pd.Timestamp | None = None,
 ) -> go.Figure:
     """Build the interactive 3D figure.
 
@@ -306,6 +365,26 @@ def build_phase_space_figure(
         ``ceil(len/1500)`` for animated mode (keeps HTML file size manageable
         — every frame stores its full cumulative trajectory, so unbounded
         daily resolution produces tens of MB of redundant data).
+    recency_window_days
+        If given, enables a recency-fade overlay on marker opacity. Markers
+        within ``[focus_date - recency_window_days, focus_date]`` keep their
+        full conviction-based opacity; older markers fade linearly toward
+        ``recency_floor`` over an additional ``recency_fade_days`` window;
+        even older markers stay at ``recency_floor``. ``None`` = disabled
+        (default; backwards compatible).
+    recency_fade_days
+        Length of the linear-fade transition zone past the full-opacity
+        window. Defaults to ``2 * recency_window_days``. Only applied when
+        ``recency_window_days`` is given.
+    recency_floor
+        Minimum opacity for ancient-but-high-conviction markers. Composed
+        multiplicatively with the volume-conviction opacity, so old +
+        low-volume markers can drop further (down to a tiny hard-floor for
+        trajectory continuity). Defaults to 0.10.
+    focus_date
+        Anchor for the recency calculation — defaults to the latest date
+        in the data. Pass an earlier date to "look back" with recency
+        emphasis around a historical pivot.
     """
     df_full = da.to_frame().dropna(subset=[x, y, z])
 
@@ -320,6 +399,38 @@ def build_phase_space_figure(
     # 252 daily points becomes 252 * subsample trading days), distorting the
     # statistic. We slice opacity by the same positional indexer as the df.
     opacity_full, z_full = _resolve_opacity(df_full)
+
+    # Recency overlay (opt-in): multiply the conviction-based alpha by a
+    # time-decay factor. When enabled even on the scalar-fallback path
+    # (no volume data), opacity becomes per-row and we promote to an array.
+    # Computing on df_full guarantees the same per-frame slicing rule as
+    # the volume path — no per-frame recompute, no color drift.
+    if recency_window_days is not None:
+        if recency_window_days < 0:
+            raise ValueError(
+                f"recency_window_days must be >= 0 or None; got {recency_window_days}"
+            )
+        fade_days = (
+            recency_fade_days if recency_fade_days is not None else 2 * recency_window_days
+        )
+        anchor = focus_date if focus_date is not None else df_full.index[-1]
+        recency = _recency_factor_array(
+            df_full.index,  # type: ignore[arg-type]
+            focus_date=anchor,
+            window_days=recency_window_days,
+            fade_days=fade_days,
+            floor=recency_floor,
+        )
+        if isinstance(opacity_full, np.ndarray):
+            opacity_full = np.clip(opacity_full * recency, _FINAL_ALPHA_HARD_FLOOR, 1.0)
+        else:
+            # Promote scalar fallback to a per-row array so the recency fade
+            # actually shows. The base level stays at the fallback value.
+            opacity_full = np.clip(
+                np.full(len(df_full), float(opacity_full)) * recency,
+                _FINAL_ALPHA_HARD_FLOOR,
+                1.0,
+            )
 
     if subsample is None:
         subsample = max(1, -(-len(df_full) // 1500)) if animate else 1
