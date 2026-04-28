@@ -56,7 +56,7 @@ src/rollender_stein/
 │   └── sec_edgar.py         # SEC EDGAR companyfacts client (shares outstanding)
 └── numeraires/
     ├── time.py              # N_Time = AHETPI / AHETPI(T0) * 100
-    ├── liquidity.py         # N_Liq = Global Fiat Ocean (US+EZ+JP)
+    ├── liquidity.py         # N_Liq = G3 Systemic Liquidity (US+EZ+JP); excludes PBOC by design
     ├── energy.py            # N_Energy = Brent → MWh (floor $0.10)
     └── gold.py              # N_Gold = raw GC=F (Kalman is diagnostic only)
 ```
@@ -155,9 +155,14 @@ self-review followups. The methodologically significant deviations:
    MLE re-estimation drifts. The implementation freezes params from the full
    fit and verifies recursion equivalence to ≥8 decimals (deterministic by
    construction).
-4. **PBOC deferred from Global Fiat Ocean.** No clean ALFRED-style source.
-   N_Liq is `US M2 + EZ M3 + JP M3` in USD. The "Global" naming is a slight
-   overstatement; flagged in the audit M-12.
+4. **PBOC deliberately excluded — N_Liq is G3, not "Global".** China's M2
+   is ~$47T USD-equivalent (comparable in size to the entire G3 ocean), but
+   PBOC data is opaque, frequently revised in methodology, subject to state
+   intervention, and convertible via a heavily-managed CNY rate. Injecting
+   it would contaminate the numéraire with synthetic FX-conversion noise.
+   Per audit finding 9.M-12, the docstring + error messages now use "G3
+   Systemic Liquidity" honestly. The function symbol `build_n_liq` and
+   Series name `N_Liq` are unchanged for API stability.
 5. **EZ/JP M3 splice with growth rates.** FRED's level series stop at
    2023-11; growth-rate variants extend through Dec 2025. `extend_levels_with_growth`
    compounds forward.

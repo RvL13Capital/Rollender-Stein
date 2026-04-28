@@ -1,12 +1,24 @@
-"""N_Liq — the Systemic Liquidity Standard.
+"""N_Liq — the G3 Systemic Liquidity Standard (US + Eurozone + Japan).
 
-Phase 3.3 of the AVE spec. The Global Fiat Ocean is the daily USD-equivalent
-sum of the world's principal monetary aggregates:
+Phase 3.3 of the AVE spec. The G3 Systemic Liquidity Ocean is the daily
+USD-equivalent sum of the three principal Western/developed-market monetary
+aggregates:
 
-    Global_Ocean(t) = US_M2(t) + EZ_M3(t) * EURUSD(t) + JP_M3(t) / USDJPY(t)
-    N_Liq(t)        = (Global_Ocean(t) / Global_Ocean(T0)) * 100
+    G3_Ocean(t) = US_M2(t) + EZ_M3(t) * EURUSD(t) + JP_M3(t) / USDJPY(t)
+    N_Liq(t)    = (G3_Ocean(t) / G3_Ocean(T0)) * 100
 
-PBOC M2 is deferred (no clean ALFRED-style vintage source for free).
+**PBOC M2 is intentionally excluded.** China's broad money is ~$47T USD-
+equivalent — comparable in size to the entire current G3 ocean — but it is:
+  - opaque (irregular reporting, frequent methodology revisions),
+  - subject to extreme state intervention (capital controls, off-balance-
+    sheet entities, opaque shadow-banking aggregates),
+  - convertible via a heavily managed CNY exchange rate.
+
+Injecting PBOC into a forensic measurement instrument would contaminate the
+otherwise-pristine numéraire with a synthetic FX-conversion artefact whose
+sign and magnitude the analyst cannot verify. The honest framing is "G3
+Systemic", not "Global". See audit finding 9.M-12 and CLAUDE.md "Spec
+deviations" for the full reasoning.
 
 Sourcing nuance: FRED's level series for EZ/JP M3 (``MABMM301EZM189S``,
 ``MABMM301JPM189S``) stopped updating at 2023-11-01, but their growth-rate
@@ -125,7 +137,7 @@ def build_n_liq(
       4. Convert to common USD scale: WM2NS is in USD billions (multiply by 1e9);
          EZ M3 is in raw EUR (multiply by EURUSD); JP M3 is in raw JPY (divide
          by USDJPY).
-      5. Sum to Global_Fiat_Ocean (USD), normalize at T0 = 100.
+      5. Sum to G3 Systemic Liquidity Ocean (USD), normalize at T0 = 100.
     """
     cal = master_calendar(end=end)
 
@@ -162,9 +174,9 @@ def build_n_liq(
     anchor_raw = ocean_usd.loc[T0_DATE]
     if not np.isfinite(anchor_raw) or anchor_raw == 0:
         raise RuntimeError(
-            f"Global_Fiat_Ocean at T0 is {anchor_raw!r}; cannot index. "
-            "All four inputs (US M2, EZ M3, JP M3, EURUSD, USDJPY) must have a "
-            "release_date <= T0 for the anchor to be defined."
+            f"G3 Systemic Liquidity Ocean at T0 is {anchor_raw!r}; cannot "
+            "index. All five inputs (US M2, EZ M3, JP M3, EURUSD, USDJPY) "
+            "must have a release_date <= T0 for the anchor to be defined."
         )
     anchor = float(anchor_raw)
     n_liq: pd.Series = ocean_usd / anchor * 100.0
