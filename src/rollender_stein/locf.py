@@ -56,6 +56,19 @@ def forward_fill_to_calendar(
     if not value_cols:
         raise ValueError("no value columns to forward-fill")
 
+    if macro.empty:
+        # Pre-empty `merge_asof` to dodge a pandas 3.0 dtype-mismatch crash:
+        # `pd.to_datetime([])` materializes as `<M8[s]>` while a populated
+        # bdate_range is `<M8[us]>`; `merge_asof` then raises MergeError.
+        # The semantically-correct result for "no macro releases yet ingested"
+        # is a calendar-shaped frame of NaN values — exactly what callers
+        # expect (forward-fill of nothing into the future is nothing).
+        out = pd.DataFrame(
+            {col: pd.Series(index=calendar_idx, dtype="float64") for col in value_cols},
+        )
+        out.index.name = "trade_date"
+        return out
+
     macro_sorted = macro.sort_values(release_col, kind="mergesort").reset_index(drop=True)
     if macro_sorted[release_col].duplicated().any():
         raise ValueError(

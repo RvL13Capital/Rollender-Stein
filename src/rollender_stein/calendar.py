@@ -37,6 +37,10 @@ def master_calendar(
     pandas_market_calendars — weekends and NYSE holidays are excluded.
     """
     if end is None:
-        end = pd.Timestamp.utcnow().tz_localize(None).normalize()
+        # `Timestamp.utcnow()` is deprecated in pandas 2.x and removed in 3.x.
+        # `Timestamp.now(tz="UTC")` is the future-proof replacement; we strip
+        # the tz back off because downstream callers (DuckDB, master_calendar
+        # consumers) all use naive timestamps.
+        end = pd.Timestamp.now(tz="UTC").tz_localize(None).normalize()
     schedule = _NYSE.schedule(start_date=start, end_date=end)
     return pd.DatetimeIndex(schedule.index, name="trade_date")

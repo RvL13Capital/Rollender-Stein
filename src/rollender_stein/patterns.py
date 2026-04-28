@@ -22,6 +22,7 @@ parameters never saw.
 from __future__ import annotations
 
 import json
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -66,7 +67,26 @@ def compute_valuation_z_scores(
         s = df[column].dropna()
         if len(s) < min_obs:
             continue
-        log_s = np.log(s)
+        # Guard against non-positive observations: `np.log(0) = -inf` and
+        # `np.log(negative) = NaN+RuntimeWarning`, both of which propagate
+        # through mean/std and silently drop the ticker via the
+        # `not np.isfinite(std_log)` check below — without surfacing why.
+        # Surface the bad-data signal explicitly instead.
+        positive = s.where(s > 0)
+        n_dropped = int(s.size - positive.notna().sum())
+        if n_dropped > 0:
+            warnings.warn(
+                f"{f.stem!r}: {n_dropped} non-positive observations in "
+                f"{column!r} dropped before log transform (likely bad-data "
+                "days; check ingest pipeline).",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        positive = positive.dropna()
+        if len(positive) < min_obs:
+            continue
+        log_s = np.log(positive)
+        s = positive  # downstream code (current/peak/momentum) uses the same series
         mean_log = float(log_s.mean())
         std_log = float(log_s.std())
         if std_log <= 0 or not np.isfinite(std_log):

@@ -123,3 +123,28 @@ def test_dump_pattern_report_writes_three_artifacts(tmp_path) -> None:
     )
     assert diag["n_obs"] == 2000
     assert summary["z_scores_rows"] == 3
+
+
+def test_z_scores_warns_on_non_positive_values(tmp_path) -> None:
+    """Pre-fix, ``np.log(0)`` produced ``-inf`` which poisoned the std into
+    NaN, and the ticker was silently dropped via the ``not np.isfinite``
+    check below — no log message, no warning. Now: surface the bad-data
+    signal explicitly via RuntimeWarning so the analyst notices."""
+    import warnings as _w
+
+    # 252 obs (= min_obs). Ten of them are zero — bad-data days.
+    values = [100.0] * 242 + [0.0] * 10
+    _seed_division(tmp_path, "BAD", values)
+
+    with _w.catch_warnings(record=True) as caught:
+        _w.simplefilter("always")
+        out = compute_valuation_z_scores(tmp_path / "divisions")
+
+    # The warning must fire and mention the ticker + count.
+    matches = [w for w in caught if issubclass(w.category, RuntimeWarning)]
+    assert any("BAD" in str(w.message) and "10" in str(w.message) for w in matches), (
+        f"expected RuntimeWarning naming 'BAD' and count 10; got: "
+        f"{[str(w.message) for w in matches]}"
+    )
+    # Ticker is dropped because remaining 242 obs < min_obs=252.
+    assert "BAD" not in out.index

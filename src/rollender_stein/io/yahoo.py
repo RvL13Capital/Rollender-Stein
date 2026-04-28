@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
+import numpy as np
 import pandas as pd
 
 
@@ -169,6 +170,9 @@ def fetch_yahoo_ohlcv(
         if src in df.columns:
             out[dst] = pd.to_numeric(df[src], errors="coerce").to_numpy()
         else:
-            out[dst] = pd.NA
+            # `np.nan` keeps the column as float64; `pd.NA` would coerce the
+            # whole column to object dtype, which breaks downstream numeric
+            # consumers (e.g. arithmetic in marketcap, persistence to DuckDB).
+            out[dst] = np.nan
 
     return out.dropna(subset=["close"]).sort_values("trade_date").reset_index(drop=True)

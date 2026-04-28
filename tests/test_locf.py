@@ -86,3 +86,28 @@ def test_explicit_value_cols_subset() -> None:
     out = forward_fill_to_calendar(macro, cal, value_cols=["wanted"])
     assert "wanted" in out.columns
     assert "ignored" not in out.columns
+
+
+def test_forward_fill_handles_empty_macro_frame() -> None:
+    """Pandas 3.0 dtype-mismatch crash regression guard. An empty macro frame
+    (e.g. a series declared in config but not yet ingested) used to trigger
+    `MergeError: incompatible merge keys` because `pd.to_datetime([])`
+    materialises as `<M8[s]>` while a populated `bdate_range` is `<M8[us]>`.
+
+    Expected behaviour: return a calendar-shaped frame of NaN values —
+    semantically correct (forward-fill of nothing into the future is nothing)
+    and dtype-stable across pandas versions."""
+    empty_macro = pd.DataFrame(
+        {
+            "release_date": pd.to_datetime([]),
+            "ahetpi": pd.Series([], dtype="float64"),
+        }
+    )
+    cal = pd.bdate_range("2024-01-15", "2024-02-05")
+    out = forward_fill_to_calendar(empty_macro, cal)
+    assert len(out) == len(cal)
+    assert "ahetpi" in out.columns
+    assert out["ahetpi"].isna().all()
+    assert out["ahetpi"].dtype == "float64"
+    assert list(out.index) == list(cal)
+    assert out.index.name == "trade_date"

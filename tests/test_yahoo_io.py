@@ -54,3 +54,24 @@ def test_empty_download_returns_typed_empty_frame() -> None:
     assert out.empty
     assert list(out.columns) == ["reference_date", "release_date", "value"]
     assert out["reference_date"].dtype == "datetime64[ns]"
+
+
+def test_ohlcv_partial_columns_use_float64_nan_not_pd_na() -> None:
+    """Pre-fix, missing OHLCV columns (e.g. yfinance returns Close+Volume
+    only for crypto-like tickers) were filled with ``pd.NA``. That promoted
+    the entire column to ``object`` dtype, breaking downstream numeric
+    arithmetic in ``marketcap`` and the DuckDB persistence layer (which
+    expects ``DOUBLE``). Use ``np.nan`` so the column stays ``float64``."""
+    from rollender_stein.io.yahoo import fetch_yahoo_ohlcv
+
+    idx = pd.DatetimeIndex(["2024-01-02", "2024-01-03"], name="Date")
+    # Only Close present — Open/High/Low/Adj Close/Volume missing.
+    df = pd.DataFrame({"Close": [100.0, 101.0]}, index=idx)
+    out = fetch_yahoo_ohlcv("BTC-USD", yf_module=_fake_yf(df))
+
+    for col in ("open", "high", "low", "adj_close", "volume"):
+        assert col in out.columns
+        assert out[col].dtype == "float64", (
+            f"column {col!r} should be float64, got {out[col].dtype}"
+        )
+        assert out[col].isna().all()
