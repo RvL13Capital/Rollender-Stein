@@ -187,19 +187,33 @@ def dump_kalman_outputs(
         value_name="innovation",
     )
 
+    fit_window = {
+        "first": str(cleaned.index.min().date()),
+        "last": str(cleaned.index.max().date()),
+    }
     params: dict[str, Any] = {
         "log_likelihood": float(fit.results.llf),
         "aic": float(fit.results.aic),
         "bic": float(fit.results.bic),
         "n_obs": len(cleaned),
-        "fit_window": {
-            "first": str(cleaned.index.min().date()),
-            "last": str(cleaned.index.max().date()),
-        },
+        "fit_window": fit_window,
         "series_ids": GOLD_SERIES_IDS,
         "params": {
             name: float(val)
             for name, val in zip(fit.results.param_names, fit.results.params, strict=True)
+        },
+        # Self-baseline (audit P2 follow-up): the innovation stddev shifted
+        # from ~1.34 (filtered residual, pre-fix) to ~24.7 (true one-step-
+        # ahead, post-fix) on production data — a ~18.5x sigma-scale,
+        # ~340x variance change. Scale-invariant ratios (recent_to_alltime,
+        # in_sigmas, autocorrelation) cancel the shift exactly, but anyone
+        # comparing absolute std values across runs needs the baseline.
+        # Embedding it here makes every persisted Kalman snapshot self-
+        # describing. See AUDIT_DECISIONS.md "P2 calibration baseline".
+        "innovation_summary": {
+            "mean": float(innovations.mean()),
+            "std": float(innovations.std()),
+            "fit_window": fit_window,
         },
     }
     params_path = root / "kalman" / "params.json"

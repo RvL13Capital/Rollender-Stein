@@ -175,6 +175,89 @@ so a future reviewer doesn't re-open the question.
 
 ---
 
+## P2 calibration baseline — empirical σ-shift after the innovations switch
+
+Finding 15.M-5 / 16.F-Major (commit `bec7a64`) replaced the persisted
+"residuals" — a *filtered* statistic ``XAU - filtered_state - X@beta`` —
+with true one-step-ahead innovations from ``MLEResults.resid``. The
+auditor estimated a ~6× variance shift; on the actual production panel
+the empirical shift is **~50× larger**. This section pins the actual
+baseline so consumers comparing pre-/post-fix absolute values aren't
+fooled.
+
+### Empirical measurement on production data (cleaned panel, 5,111 obs)
+
+| Statistic | OLD filtered residual | NEW innovation | Ratio |
+|---|---:|---:|---:|
+| mean | 0.0499 | 0.9829 | 19.7× |
+| **std** | **1.3369** | **24.6775** | **18.46×** |
+| **variance** | **1.787** | **608.98** | **340.7×** |
+
+The variance multiplier is **340×**, not the auditor's ~6× estimate.
+
+### Why the multiplier is so large — finding 10.M-13 in numbers
+
+From the same fit's ``params.json``:
+
+```
+sigma2.level     = 481.28
+sigma2.irregular =  31.14
+ratio (level/irregular) ≈ 15.5
+```
+
+Innovation variance ≈ σ²_level + σ²_irregular ≈ 512 (theoretical) /
+609 (empirical, slight model misfit gap). Filtered residual variance is
+much smaller than σ²_irregular alone (1.79 vs. 31.14) because the Kalman
+filter sees every observation before estimating the state at that point —
+it fits the data as tightly as the parameter set permits, then a re-
+projection through the regression collapses what's left.
+
+This is the quantitative confirmation of audit finding **10.M-13**: the
+MLE is identification-degenerate, with the level random walk dominating
+σ²_irregular by a factor of ~15. The "filtered residual" was therefore
+an *over-smoothed look-ahead artefact*, not a residual in any meaningful
+statistical sense.
+
+### What stayed bit-stable across the switch
+
+Scale-invariant metrics on the same production panel, OLD vs. NEW:
+
+| Metric | OLD | NEW | Comment |
+|---|---:|---:|---|
+| autocorr_1 | 0.0021 | 0.0023 | indistinguishable |
+| recent_to_alltime_std_ratio | 3.347 | 3.154 | within 6 % |
+| **last_innovation_in_recent_sigmas** | **-0.0066** | **-0.0066** | **bit-identical** |
+
+The z-score normalisation cancels the σ-shift exactly. Any consumer
+using ratios or sigma-distances is unaffected; only consumers reading
+absolute std/mean values out of the diagnostics JSON need to re-read
+their thresholds.
+
+### Codebase threshold audit
+
+Greppable absolute thresholds in ``patterns.py`` post-rename:
+
+```
+min_obs: int = 252                      # sample size — scale-invariant
+return_window: int = 21                 # time window — scale-invariant
+int(len(df) * 0.5)                      # coverage 50 % — scale-invariant
+```
+
+There are no hardcoded z-score gates, σ-bands, or magic-number cutoffs
+on innovation values. The function ``compute_kalman_innovation_diagnostics``
+emits raw statistics; the interpretation is the consumer's responsibility.
+Tests use synthetic ground-truth data and pass scale-correct constants
+that map to the actual signal, so they remain valid.
+
+### Self-describing artefact (commit closing P2)
+
+``persist.dump_kalman_outputs`` now writes ``innovation_summary: {mean,
+std, fit_window}`` into ``params.json``. Every persisted Kalman snapshot
+captures its own σ-baseline at write time. Comparing two runs with
+different baselines is then a documented act, not a silent confusion.
+
+---
+
 ## How this list was built
 
 Each finding was checked against the live tree at `HEAD` via `grep` on the

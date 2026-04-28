@@ -251,6 +251,33 @@ def test_dump_kalman_outputs_uses_precomputed_fit(seeded_con, tmp_path) -> None:
     assert fs["mu_t"].iloc[-1] == pytest.approx(float(fit.filtered_state.iloc[-1]))
 
 
+def test_params_json_carries_innovation_summary(seeded_con, tmp_path) -> None:
+    """P2 follow-up: every persisted Kalman snapshot must be self-describing
+    so consumers comparing absolute std/mean across runs aren't confused by
+    the post-innovation-switch ~18.5x sigma-shift documented in
+    AUDIT_DECISIONS.md. The ``innovation_summary`` block in params.json
+    embeds the run's own baseline at write time."""
+    from rollender_stein.persist import dump_kalman_outputs
+
+    info = dump_kalman_outputs(
+        seeded_con, end=pd.Timestamp("2010-12-31"), root=tmp_path
+    )
+    params = json.loads(Path(info["params_path"]).read_text())
+    assert "innovation_summary" in params, (
+        "params.json should embed an innovation_summary block — see "
+        "AUDIT_DECISIONS.md 'P2 calibration baseline' for rationale."
+    )
+    summary = params["innovation_summary"]
+    assert {"mean", "std", "fit_window"} == set(summary.keys())
+    assert isinstance(summary["mean"], float)
+    assert isinstance(summary["std"], float)
+    assert summary["std"] > 0.0
+    assert {"first", "last"} == set(summary["fit_window"].keys())
+    # The fit_window in innovation_summary mirrors the top-level fit_window
+    # so the block is self-contained when extracted.
+    assert summary["fit_window"] == params["fit_window"]
+
+
 def test_innovations_file_matches_statsmodels_resid(seeded_con, tmp_path) -> None:
     """Findings 15.M-5 / 16.F-Major regression guard.
 
