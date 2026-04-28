@@ -251,6 +251,40 @@ def test_dump_kalman_outputs_uses_precomputed_fit(seeded_con, tmp_path) -> None:
     assert fs["mu_t"].iloc[-1] == pytest.approx(float(fit.filtered_state.iloc[-1]))
 
 
+def test_innovations_file_matches_statsmodels_resid(seeded_con, tmp_path) -> None:
+    """Findings 15.M-5 / 16.F-Major regression guard.
+
+    The persisted ``innovations.parquet`` must contain the true one-step-
+    ahead innovations from statsmodels (``MLEResults.resid``), NOT the
+    filtered residuals ``XAU - filtered_state - X@beta`` that the prior
+    implementation wrote. Filtered residuals have ~6x lower variance than
+    innovations because the state estimate at t exploits data through t —
+    diagnostics computed on them (autocorrelation, variance-regime ratios)
+    are silently mis-scaled.
+
+    This test pins the persisted bytes directly to ``fit.results.resid`` so
+    any future regression that re-derives "residuals" from the filtered
+    state will fail loudly here."""
+    import numpy as np
+
+    from rollender_stein.numeraires.gold import assemble_panel, fit_gold_model
+    from rollender_stein.persist import dump_kalman_outputs
+
+    panel = assemble_panel(seeded_con, end=pd.Timestamp("2010-12-31"))
+    fit = fit_gold_model(panel)
+
+    info = dump_kalman_outputs(
+        seeded_con, end=pd.Timestamp("2010-12-31"), root=tmp_path, fit=fit
+    )
+    inn_disk = pd.read_parquet(info["innovations"].path)["innovation"]
+    sm_resid = np.asarray(fit.results.resid)
+
+    assert len(inn_disk) == len(sm_resid)
+    np.testing.assert_array_almost_equal(
+        inn_disk.to_numpy(), sm_resid, decimal=12
+    )
+
+
 def test_dump_phase4_panel_uses_precomputed_panel(seeded_con, tmp_path) -> None:
     """Audit patch 05: dump_phase4_panel must accept a precomputed panel."""
     from rollender_stein.numeraires.gold import assemble_panel

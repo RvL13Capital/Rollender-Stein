@@ -1,10 +1,11 @@
 """Statistical pattern extraction on the AVE outputs.
 
-These are DESCRIPTIVE diagnostics — z-scores, correlations, residual statistics —
-NOT predictive signals. Mean-reversion of an asset's gold-multiplier z-score is
-a hypothesis, not a fact. Correlation matrices describe past joint movement,
-which can break in regime shifts. Kalman residual autocorrelation tells you
-whether the model captures structure, not where prices go next.
+These are DESCRIPTIVE diagnostics — z-scores, correlations, innovation
+statistics — NOT predictive signals. Mean-reversion of an asset's gold-
+multiplier z-score is a hypothesis, not a fact. Correlation matrices
+describe past joint movement, which can break in regime shifts. Kalman
+innovation autocorrelation tells you whether the model's one-step-ahead
+forecasts capture structure, not where prices go next.
 
 Anyone using these outputs to size positions or time entries should:
 
@@ -165,7 +166,15 @@ def compute_correlation_matrix(
 
 
 @dataclass(frozen=True)
-class KalmanResidualDiagnostics:
+class KalmanInnovationDiagnostics:
+    """One-step-ahead innovation diagnostics — see audit findings 15.M-5 /
+    16.F-Major. Statistics on ``MLEResults.resid`` (true innovations
+    ``y_t - E[y_t | F_{t-1}]``), NOT on the filtered residuals
+    ``y_t - filtered_state - X@beta`` which the prior implementation used.
+    Innovations have ~6x higher variance than filtered residuals because
+    the state estimate at t exploits data through t-1 only, not through t.
+    """
+
     n_obs: int
     mean: float
     std: float
@@ -175,40 +184,45 @@ class KalmanResidualDiagnostics:
     autocorr_63: float
     recent_12m_std: float
     recent_to_alltime_std_ratio: float
-    last_residual: float
-    last_residual_in_recent_sigmas: float
+    last_innovation: float
+    last_innovation_in_recent_sigmas: float
 
 
-def compute_kalman_residual_diagnostics(
-    residuals_path: Path,
-) -> KalmanResidualDiagnostics:
-    """Diagnostics on the Phase-4 Kalman residuals.
+def compute_kalman_innovation_diagnostics(
+    innovations_path: Path,
+) -> KalmanInnovationDiagnostics:
+    """Diagnostics on the Phase-4.5 Kalman innovations.
 
-    Low |AR(k)| → model captures structure. A spike in recent residual
+    Low |AR(k)| → model's one-step-ahead forecasts capture the structure
+    in the data (no leftover predictability). A spike in recent innovation
     variance vs all-time variance signals a regime shift the structural
     model can no longer explain — important context for any signal built
     on top of N_Gold.
+
+    The input file ``innovations.parquet`` is written by
+    ``persist.dump_kalman_outputs`` from ``fit.results.resid`` (statsmodels
+    one-step-ahead innovations).
     """
-    res = pd.read_parquet(residuals_path)["residual"].dropna()
-    n = len(res)
+    inn = pd.read_parquet(innovations_path)["innovation"].dropna()
+    n = len(inn)
     if n < 252:
-        raise RuntimeError(f"residuals series too short ({n} obs)")
-    recent = res.iloc[-252:]
-    alltime_std = float(res.std())
+        raise RuntimeError(f"innovations series too short ({n} obs)")
+    recent = inn.iloc[-252:]
+    alltime_std = float(inn.std())
     recent_std = float(recent.std())
-    return KalmanResidualDiagnostics(
+    return KalmanInnovationDiagnostics(
         n_obs=n,
-        mean=float(res.mean()),
+        mean=float(inn.mean()),
         std=alltime_std,
-        autocorr_1=float(res.autocorr(lag=1)),
-        autocorr_5=float(res.autocorr(lag=5)),
-        autocorr_21=float(res.autocorr(lag=21)),
-        autocorr_63=float(res.autocorr(lag=63)),
+        autocorr_1=float(inn.autocorr(lag=1)),
+        autocorr_5=float(inn.autocorr(lag=5)),
+        autocorr_21=float(inn.autocorr(lag=21)),
+        autocorr_63=float(inn.autocorr(lag=63)),
         recent_12m_std=recent_std,
         recent_to_alltime_std_ratio=recent_std / alltime_std if alltime_std > 0 else float("nan"),
-        last_residual=float(res.iloc[-1]),
-        last_residual_in_recent_sigmas=(
-            float(res.iloc[-1] / recent_std) if recent_std > 0 else float("nan")
+        last_innovation=float(inn.iloc[-1]),
+        last_innovation_in_recent_sigmas=(
+            float(inn.iloc[-1] / recent_std) if recent_std > 0 else float("nan")
         ),
     )
 
@@ -223,7 +237,10 @@ def dump_pattern_report(
     Outputs:
       - patterns/valuation_z_scores.parquet
       - patterns/correlation_matrix.parquet
-      - patterns/kalman_residual_diagnostics.json
+      - patterns/kalman_innovation_diagnostics.json  (renamed from
+        ``kalman_residual_diagnostics.json`` — see findings 15.M-5 /
+        16.F-Major; the underlying statistic is now true one-step-ahead
+        innovations, not filtered residuals).
     """
     patterns_dir = root / "patterns"
     patterns_dir.mkdir(parents=True, exist_ok=True)
@@ -234,11 +251,11 @@ def dump_pattern_report(
     corr = compute_correlation_matrix(root / "divisions", column=column)
     corr.to_parquet(patterns_dir / "correlation_matrix.parquet")
 
-    diag = compute_kalman_residual_diagnostics(
-        root / "kalman" / "residuals.parquet"
+    diag = compute_kalman_innovation_diagnostics(
+        root / "kalman" / "innovations.parquet"
     )
     diag_dict = diag.__dict__.copy()
-    (patterns_dir / "kalman_residual_diagnostics.json").write_text(
+    (patterns_dir / "kalman_innovation_diagnostics.json").write_text(
         json.dumps(diag_dict, indent=2, sort_keys=True)
     )
 

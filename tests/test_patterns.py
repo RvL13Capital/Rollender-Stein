@@ -9,7 +9,7 @@ import pytest
 
 from rollender_stein.patterns import (
     compute_correlation_matrix,
-    compute_kalman_residual_diagnostics,
+    compute_kalman_innovation_diagnostics,
     compute_valuation_z_scores,
     dump_pattern_report,
 )
@@ -25,13 +25,13 @@ def _seed_division(tmp_path: Path, ticker: str, values: list[float]) -> None:
     df.to_parquet(div_dir / f"{ticker}.parquet")
 
 
-def _seed_residuals(tmp_path: Path, values: list[float]) -> None:
+def _seed_innovations(tmp_path: Path, values: list[float]) -> None:
     kal_dir = tmp_path / "kalman"
     kal_dir.mkdir(parents=True, exist_ok=True)
     idx = pd.bdate_range("2010-01-04", periods=len(values))
-    df = pd.DataFrame({"residual": values}, index=idx)
+    df = pd.DataFrame({"innovation": values}, index=idx)
     df.index.name = "trade_date"
-    df.to_parquet(kal_dir / "residuals.parquet")
+    df.to_parquet(kal_dir / "innovations.parquet")
 
 
 def test_z_scores_skip_short_series(tmp_path) -> None:
@@ -82,8 +82,10 @@ def test_correlation_two_perfectly_aligned_series(tmp_path) -> None:
 def test_kalman_diagnostics_white_noise_input(tmp_path) -> None:
     rng = np.random.default_rng(42)
     res = rng.normal(0, 1.0, 2000)
-    _seed_residuals(tmp_path, list(res))
-    diag = compute_kalman_residual_diagnostics(tmp_path / "kalman" / "residuals.parquet")
+    _seed_innovations(tmp_path, list(res))
+    diag = compute_kalman_innovation_diagnostics(
+        tmp_path / "kalman" / "innovations.parquet"
+    )
     assert diag.n_obs == 2000
     assert abs(diag.autocorr_1) < 0.1, "white noise must have ~0 AR(1)"
     assert abs(diag.std - 1.0) < 0.1
@@ -94,8 +96,10 @@ def test_kalman_diagnostics_recent_variance_blowup_detected(tmp_path) -> None:
     rng = np.random.default_rng(7)
     early = rng.normal(0, 1.0, 1500)
     late = rng.normal(0, 5.0, 252)
-    _seed_residuals(tmp_path, list(np.concatenate([early, late])))
-    diag = compute_kalman_residual_diagnostics(tmp_path / "kalman" / "residuals.parquet")
+    _seed_innovations(tmp_path, list(np.concatenate([early, late])))
+    diag = compute_kalman_innovation_diagnostics(
+        tmp_path / "kalman" / "innovations.parquet"
+    )
     assert diag.recent_to_alltime_std_ratio > 1.5, (
         f"recent variance blowup must surface in the ratio; got "
         f"{diag.recent_to_alltime_std_ratio}"
@@ -108,18 +112,18 @@ def test_dump_pattern_report_writes_three_artifacts(tmp_path) -> None:
     for tk, drift in [("A", 0.0001), ("B", -0.0001), ("C", 0.0)]:
         a = np.exp(np.cumsum(rng.normal(drift, 0.01, n)))
         _seed_division(tmp_path, tk, list(a))
-    _seed_residuals(tmp_path, list(rng.normal(0, 1.0, 2000)))
+    _seed_innovations(tmp_path, list(rng.normal(0, 1.0, 2000)))
 
     summary = dump_pattern_report(root=tmp_path)
     assert (tmp_path / "patterns" / "valuation_z_scores.parquet").exists()
     assert (tmp_path / "patterns" / "correlation_matrix.parquet").exists()
-    assert (tmp_path / "patterns" / "kalman_residual_diagnostics.json").exists()
+    assert (tmp_path / "patterns" / "kalman_innovation_diagnostics.json").exists()
 
     z = pd.read_parquet(tmp_path / "patterns" / "valuation_z_scores.parquet")
     assert set(z.index) == {"A", "B", "C"}
 
     diag = json.loads(
-        (tmp_path / "patterns" / "kalman_residual_diagnostics.json").read_text()
+        (tmp_path / "patterns" / "kalman_innovation_diagnostics.json").read_text()
     )
     assert diag["n_obs"] == 2000
     assert summary["z_scores_rows"] == 3

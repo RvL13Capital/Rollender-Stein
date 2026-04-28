@@ -12,7 +12,7 @@ Folder layout:
     data/derived/
         numeraires/       # one parquet per numéraire (single-column Series)
         panels/           # the cleaned XAU/TIPS/DXY/VIX panel feeding Phase 4
-        kalman/           # filtered_state, params (JSON), residuals
+        kalman/           # filtered_state, params (JSON), innovations
         divisions/        # one parquet per ingested asset
         manifest.json     # generated_at, T0, file inventory with row counts
 """
@@ -33,14 +33,13 @@ from rollender_stein.bitemporal import get_asset_closes
 from rollender_stein.calendar import T0_DATE
 from rollender_stein.numeraires.energy import build_n_energy
 from rollender_stein.numeraires.gold import (
-    EXOG_COLS,
+    SERIES_IDS as GOLD_SERIES_IDS,
+)
+from rollender_stein.numeraires.gold import (
     GoldFit,
     assemble_panel,
     build_n_gold,
     fit_gold_model,
-)
-from rollender_stein.numeraires.gold import (
-    SERIES_IDS as GOLD_SERIES_IDS,
 )
 from rollender_stein.numeraires.liquidity import build_n_liq
 from rollender_stein.numeraires.time import build_n_time
@@ -139,16 +138,28 @@ def dump_kalman_outputs(
     root: Path = DEFAULT_DERIVED_ROOT,
     fit: GoldFit | None = None,
 ) -> dict[str, ArtifactInfo | str]:
-    """Write the Kalman filtered state, residuals, and MLE parameters.
+    """Write the Kalman filtered state, innovations, and MLE parameters.
 
     Outputs:
       - kalman/filtered_state.parquet : mu_t (latent "true core gold")
-      - kalman/residuals.parquet      : y_t - mu_t - beta . x_t (one-step-ahead)
+      - kalman/innovations.parquet    : y_t - E[y_t | F_{t-1}] (true
+                                        one-step-ahead innovations from
+                                        ``MLEResults.resid``)
       - kalman/params.json            : MLE param vector + log-likelihood
 
     ``fit`` may be passed precomputed (audit patch 05 caching) to avoid the
     full assemble_panel + fit_gold_model cycle when ``dump_all_artifacts``
     has already done it. If None, computes from scratch.
+
+    Innovation note (audit findings 15.M-5 / 16.F-Major): the prior version
+    of this function computed ``XAU - filtered_state - X@beta`` and called
+    those "residuals". Mathematically those are *filtered* residuals, which
+    use data through time t to estimate state at t — their variance is
+    artificially compressed (~6x lower than true innovations). The fix is
+    to use ``fit.results.resid`` directly, which statsmodels defines as
+    ``y_t - E[y_t | data through t-1]``, i.e. the genuine one-step-ahead
+    forecast errors. Diagnostics (autocorrelation, variance regime shifts)
+    are valid only on innovations.
     """
     _ensure_dirs(root)
     if fit is None:
@@ -162,21 +173,18 @@ def dump_kalman_outputs(
         value_name="mu_t",
     )
 
-    # One-step-ahead residuals from the cleaned-panel observations vs filtered.
+    # True one-step-ahead innovations from statsmodels MLEResults. Indexed
+    # against the cleaned panel (the model dropped any rows with NaN exog).
     cleaned = fit.panel_clean
-    beta = np.array([
-        fit.results.params[f"beta.{c}"] for c in EXOG_COLS
-    ])
-    residuals = (
-        cleaned["XAU"]
-        - filtered.values
-        - cleaned[EXOG_COLS].to_numpy() @ beta
+    innovations = pd.Series(
+        np.asarray(fit.results.resid),
+        index=cleaned.index,
+        name="innovation",
     )
-    residuals.index = cleaned.index
-    res_info = _write_series(
-        residuals.rename("residual"),
-        root / "kalman" / "residuals.parquet",
-        value_name="residual",
+    inn_info = _write_series(
+        innovations,
+        root / "kalman" / "innovations.parquet",
+        value_name="innovation",
     )
 
     params: dict[str, Any] = {
@@ -199,7 +207,7 @@ def dump_kalman_outputs(
 
     return {
         "filtered_state": state_info,
-        "residuals": res_info,
+        "innovations": inn_info,
         "params_path": str(params_path),
     }
 
@@ -291,7 +299,7 @@ def dump_all_artifacts(
         "panel": asdict(panel),
         "kalman": {
             "filtered_state": asdict(kalman["filtered_state"]),  # type: ignore[arg-type]
-            "residuals": asdict(kalman["residuals"]),  # type: ignore[arg-type]
+            "innovations": asdict(kalman["innovations"]),  # type: ignore[arg-type]
             "params_path": kalman["params_path"],
         },
         "divisions": {k: asdict(v) for k, v in divisions.items()},
