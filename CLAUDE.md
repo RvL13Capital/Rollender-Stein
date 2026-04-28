@@ -24,7 +24,7 @@ empirically demoted to a diagnostic during the audit-fix campaign — see
 
 ```bash
 # Run from repo root.
-.venv/bin/pytest -q                      # full test suite (~131 tests)
+.venv/bin/pytest -q                      # full test suite (~182 tests)
 .venv/bin/mypy --strict src              # type check (must be clean)
 .venv/bin/ruff check src tests           # lint (must be clean)
 .venv/bin/pytest --cov=src/rollender_stein --cov-report=term  # coverage
@@ -47,7 +47,7 @@ src/rollender_stein/
 ├── audit.py                 # truncation_hash_audit — Phase 7
 ├── assets.py                # ingest_yahoo_asset + build_pipeline_for_asset
 ├── persist.py               # dump_all_artifacts → data/derived/*
-├── patterns.py              # z-scores, correlations, residual diagnostics
+├── patterns.py              # z-scores, correlations, Kalman innovation diagnostics
 ├── volume.py                # dollar-turnover + rolling vol z-score (dashboard conviction channel)
 ├── io/
 │   ├── fred.py              # FRED + ALFRED clients + PUBLICATION_LAG_BD
@@ -122,9 +122,12 @@ sign-off:
 3. **Vintage macro data.** FRED queries with revisions go through
    `fetch_alfred_first_release` (output_type=4). Daily series with no
    meaningful revisions use `fetch_fred_observations`.
-4. **Total Return for equities.** Individual stocks ingest with
-   `use_adjusted_as_close=True` so `adj_close` becomes `close`. Pre-TR
-   indexes (^SP500TR) use raw close.
+4. **Total Return for equities.** Individual stocks ingest both raw
+   `close` and dividend+split-adjusted `adj_close`; consumers choose at
+   read time via `get_asset_closes(prefer_adjusted=True)` for per-share
+   absolute valuation (TR-equivalent), or `prefer_adjusted=False` for
+   market-cap (raw shares × raw close). The legacy
+   `use_adjusted_as_close` ingest parameter is deprecated.
 5. **Strict typing.** `mypy --strict` zero-error gate is non-negotiable.
 6. **Bitemporal release validation.** `_validate_release_after_reference`
    raises ValueError if `release_date < reference_date` (audit patch 01).
@@ -134,8 +137,13 @@ sign-off:
 
 ## Spec deviations (deliberate, audit-fix campaign)
 
-Eight commits `dfe487d → 98302c9` applied seven audit patches plus three
-self-review followups. The methodologically significant deviations:
+Initial audit-fix campaign: eight commits `dfe487d → 98302c9` applied
+seven audit patches plus three self-review followups. A second-pass audit
+(`af3956a` → `96340ca`, six commits across 2026-04-27/28) closed out the
+step-by-step review with patches P1-P4 (tech hygiene, innovations switch,
+G3 rename, better-way docstrings) plus the formal decision log
+[`AUDIT_DECISIONS.md`](AUDIT_DECISIONS.md). The methodologically
+significant deviations:
 
 1. **Patch 06 Option C — N_Gold uses raw XAU, Kalman demoted.**
    The original spec specified a Kalman state-space model orthogonalizing
@@ -166,6 +174,17 @@ self-review followups. The methodologically significant deviations:
 5. **EZ/JP M3 splice with growth rates.** FRED's level series stop at
    2023-11; growth-rate variants extend through Dec 2025. `extend_levels_with_growth`
    compounds forward.
+6. **Kalman innovations, not filtered residuals (P2, `bec7a64`).** The
+   prior implementation persisted `XAU - filtered_state - X@beta` and
+   called those "residuals". On production data those filtered residuals
+   have ~340x lower variance than true one-step-ahead innovations
+   (`fit.results.resid`) — they are an over-smoothed look-ahead artefact,
+   not a residual. Patch P2 switched the persisted output and downstream
+   diagnostics to true innovations. The shift is itself a quantification
+   of audit finding 10.M-13: σ²_level/σ²_irregular ≈ 15. Consumers using
+   scale-invariant metrics (recent_to_alltime_std_ratio, last_in_sigmas,
+   autocorr) are unaffected; absolute std/mean shifted ~18.5x σ-scale.
+   See AUDIT_DECISIONS.md "P2 calibration baseline".
 
 ## Data and persistence
 
@@ -173,11 +192,13 @@ self-review followups. The methodologically significant deviations:
   `fx_close` tables. Auto-migrates on every `open_db`.
 - `data/derived/` (gitignored) — transformed outputs:
   - `numeraires/{n_time,n_liquidity,n_energy,n_gold}.parquet`
-  - `panels/kalman_panel.parquet` — Phase 4 input
-  - `kalman/{filtered_state,residuals}.parquet` + `params.json`
+  - `panels/kalman_panel.parquet` — Phase 4.5 input
+  - `kalman/{filtered_state,innovations}.parquet` + `params.json` (the
+    `params.json` includes a self-describing `innovation_summary: {mean,
+    std, fit_window}` block — see Spec Deviation #6)
   - `divisions/{TICKER}.parquet` — one per ingested asset
   - `patterns/{valuation_z_scores,correlation_matrix}.parquet` +
-    `kalman_residual_diagnostics.json`
+    `kalman_innovation_diagnostics.json`
   - `manifest.json` — inventory with row counts and date ranges
 - `data/dashboard_*.html` — static + animated Plotly outputs
 
@@ -233,7 +254,9 @@ with open_db("data/ave.duckdb") as con:
 - **Parameter-level look-ahead in Kalman.** MLE fits on the full panel;
   rolling MLE not implemented. Diagnostic-only since patch 06; if N_Gold
   ever returns to Kalman-driven, this becomes a real backtest concern.
-- **PBOC missing.** ~50% of global broad money is excluded.
+- **PBOC deliberately excluded.** ~50% of global broad money is out of
+  scope by design (see Spec Deviation #4 — China's data is opaque, state-
+  managed, CNY-conversion-contaminated). N_Liq is honestly G3, not global.
 - **No CI.** Tests run locally only.
 - **Heavy-tailed gold returns.** The Kalman is QMLE; std errors from
   statsmodels are wrong by orders of magnitude (we don't report them).

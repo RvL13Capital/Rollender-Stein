@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "rollender-stein"
 version = "0.0.1"
-description = "Stealth-mode market analysis, trading signal generation, and strategy backtesting."
+description = "Absolute Valuation Engine (AVE) — forensic Python toolkit measuring asset prices against four T0-anchored numéraires (Time, Liquidity, Energy, Gold) for absolute, fiat-deflated valuation in 3D phase space."
 readme = "README.md"
 requires-python = ">=3.12"
 authors = [{ name = "RvL13 Capital" }]
