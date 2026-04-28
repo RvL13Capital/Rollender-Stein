@@ -1,23 +1,31 @@
-"""Phase 7 — Truncation Hash Audit.
+"""Phase 7 — Truncation Hash Audit (look-ahead software guard).
 
-Goal: prove the Kalman filter does not leak future information into past
-state estimates. The literal spec test (refit MLE on truncated data; compare
-the filtered state at the truncation point) conflates parameter-estimation
-drift with state-recursion leakage — under MLE refit, parameters change
-across observation sets even when no future data leaks into the recursion,
-so the literal test is uninformative.
+**Scope (audit finding 12.M-6):** this is a *software guard* against
+implementation regressions, not a theoretical Kalman test. For any
+correctly-implemented deterministic Kalman filter the hash is theorem-
+guaranteed to match — that's exactly the point. The detection set is
+empty for any sane implementation today, so a passing run says nothing
+new about the math.
 
-We instead use the **frozen-params variant**: fit MLE once on the full panel,
-freeze the resulting parameter vector, then run the Kalman filter at those
-frozen parameters on a prefix of the data. The filtered state at the
-truncation point must be IDENTICAL (to numerical precision) between the
-full-panel run and the truncated run. Any discrepancy is mathematical
-proof of a leak.
+What the test catches is *future code drift* — a refactor that
+accidentally substitutes ``smoothed_state`` for ``filtered_state``, a
+junior engineer who passes the wrong slice, a dependency upgrade that
+changes statsmodels' state-vector layout. In that scenario the recursion
+stops being a deterministic function of (params, data alone) and the
+hash diverges. Treat a failure as "an implementation invariant broke";
+do not infer "the Kalman math is wrong".
 
-Determinism note: the Kalman filter is a deterministic function of (params,
-data). For an identical params vector, the recursion on a strict prefix of
-the data must produce a strict prefix of the same filtered state. Even
-single-bit discrepancies are bugs.
+The literal spec test (refit MLE on truncated data; compare the filtered
+state at the truncation point) conflates parameter-estimation drift with
+state-recursion leakage — under MLE refit, parameters change across
+observation sets even when no future data leaks into the recursion, so
+the literal test is uninformative.
+
+We instead use the **frozen-params variant**: fit MLE once on the full
+panel, freeze the resulting parameter vector, then run the Kalman filter
+at those frozen parameters on a prefix of the data. The filtered state at
+the truncation point must be IDENTICAL (to numerical precision) between
+the full-panel run and the truncated run.
 """
 
 from __future__ import annotations
@@ -95,10 +103,15 @@ def truncation_hash_audit(
 
     if abs_diff > tol:
         raise AssertionError(
-            f"truncation hash audit FAILED at {truncate_at.date()}: "
+            f"look-ahead software guard tripped at {truncate_at.date()}: "
             f"full={full_state_at_t!r} vs truncated={trunc_state_at_t!r}, "
             f"abs_diff={abs_diff:.3e} > tol={tol:.3e}. "
-            f"This indicates state-recursion leakage; rewrite Phase 4.",
+            "The Kalman recursion at frozen params should be a deterministic "
+            "function of (params, data); a divergence here means an "
+            "implementation invariant broke (e.g. filtered/smoothed mix-up, "
+            "wrong index slice, statsmodels state-vector layout drift). "
+            "Investigate the recent code path; do NOT infer the Kalman math "
+            "itself is wrong."
         )
 
     return TruncationHashResult(

@@ -13,6 +13,19 @@ reference_date released on that day (the headline figure).
 
 Storage: a single DuckDB file at ``data/ave.duckdb``. No server. Columnar. Schema is
 portable to Postgres+Timescale if we ever need horizontal scale.
+
+Asset-side scope (audit finding 3.3):
+``asset_price`` is **unitemporal** — point-in-time state replacement, NOT bitemporal.
+A bitemporal asset schema would track which historical close was reported at which
+"as-of" date. Yahoo Finance retroactively re-denominates closes for splits and
+re-injects dividend reinvestment, so a bitemporal model of yfinance would imply
+that splits and dividends are *epistemic revisions of past facts*. They are not —
+a stock split is a unit re-denomination (exchange one old share for N new ones at
+1/N the price), not a revelation that the prior price was wrong. Properly
+bitemporal asset data requires a CRSP-equivalent paid feed (~$50K/yr), which is
+out of scope for AVE. The unitemporal schema accepts the limitation honestly:
+the ``close`` column reflects yfinance's *current* split- and dividend-adjusted
+view, which moves over time as new corporate actions occur.
 """
 
 from __future__ import annotations

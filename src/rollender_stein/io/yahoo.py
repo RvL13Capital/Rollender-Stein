@@ -3,17 +3,23 @@
 Used for daily series unavailable from FRED — primarily gold (the LBMA series
 were removed from FRED in 2017 due to licensing changes).
 
-Forensic note on ``GC=F`` (gold front-month continuous futures): the AVE spec
-forbids futures for Phase 3.2 N_Energy because Brent's roll-yield contango
-materially distorts a 25-year price series. For gold, the basis carry is much
-smaller — gold has near-zero storage cost relative to its value — and the
-remaining noise is absorbed into the Kalman observation residual. ``GC=F`` is
-therefore an acceptable spot-gold proxy under this spec, and the only free
-24/7-available source with full T0-onward history.
+Forensic note on ``GC=F`` (gold front-month continuous futures), updated
+post-Patch-06 + audit pass-5 §4 + finding 6.1: the previous version of this
+docstring claimed the residual roll-bias was "absorbed into the Kalman
+observation residual." That was empirically false — in the level-dominant
+regime the model actually fits, ``σ²_irregular`` is near zero, so the
+Kalman cannot absorb structured noise; rolls feed through into ``μ_t``.
 
-If a paid LBMA / ICE feed becomes available later, swap this loader out and
-re-ingest under a different ``series_id``; the bitemporal store distinguishes
-sources via the ``source`` column.
+Patch 06 demoted the Kalman to a Phase 4.5 diagnostic and switched N_Gold
+itself to ``raw GC=F / raw GC=F(2000-08-30) * 100``. The ~5%/year roll-
+yield bias (~6 rolls * basis, conservative estimate) is now an
+**acknowledged limitation** of N_Gold, not a model artefact. Quantify the
+residual via ``patterns.compute_kalman_innovation_diagnostics`` if needed.
+
+``GC=F`` remains the only free 24/7-available gold series with full
+T0-onward history. If a paid LBMA / ICE feed becomes available later, swap
+this loader out and re-ingest under a different ``series_id``; the
+bitemporal store distinguishes sources via the ``source`` column.
 """
 
 from __future__ import annotations
