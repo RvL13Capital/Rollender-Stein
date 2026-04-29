@@ -311,6 +311,127 @@ different baselines is then a documented act, not a silent confusion.
 
 ---
 
+## §7 Perspective Commitment — Consumer-Side Numéraires
+
+A foundational design choice underlying all four numéraires: **the AVE
+measures from the consumer / wage-earner / investor perspective, not the
+productive-capacity perspective.** This commitment is implicit in each
+numéraire's construction; this section makes it explicit so future
+reviewers and contributors understand why proposals that violate the
+perspective will be declined — not because the proposal is technically
+wrong, but because it would shift the question the system answers.
+
+### What the perspective is
+
+Each numéraire is interpreted as a "what could I buy with this asset's
+value" measure, from the same vantage point (the holder of the asset):
+
+| Numéraire | Question it answers |
+|---|---|
+| **N_Time** | How many hours of my own labor would I have to work to afford this asset? |
+| **N_Energy** | How many MWh of energy could I buy with this asset's value? |
+| **N_Liq** | What share of the G3 broad money supply does this asset represent? |
+| **N_Gold** | How many ounces of gold could I buy with this asset's value? |
+
+All four answer the same template ("how much X could I buy"), from the
+same vantage. They are complementary axes of *one* perspective, not
+isolated indicators of four perspectives.
+
+### What the perspective explicitly rejects
+
+The natural alternative — the **productive-capacity perspective** — would
+deflate by metrics that ask a different question ("given the same
+productive input, what could the *economy* produce in real terms?"):
+
+- Total Factor Productivity (TFP)
+- Output-per-hour-worked (BLS productivity series)
+- Productivity-adjusted unit labor cost (ULC)
+- Capital-deepening-adjusted real wages
+
+Those are valid questions. They are **not** the question AVE answers.
+Deflating by TFP-adjusted measures would *normalize away* the
+labor-vs-capital share shift over the last 25 years — precisely the
+divergence AVE is built to surface.
+
+### Why this matters: the robotics / automation question
+
+A common reviewer challenge: AHETPI excludes robots, software, and
+algorithmic labor. Under the productive-capacity perspective, this is a
+problem (AHETPI underestimates real productive output). **Under the
+consumer-side perspective, it is a feature, not a bug.**
+
+When a robot makes the iPhone, the human still pays for it with their
+salary. The robot is in the *thing being valued* (Apple's productive
+capacity, embedded in its market cap), not in the *valuer's purchasing
+power* (the consumer's hour of work). The 25-year divergence between
+AAPL's nominal price growth and AHETPI's modest growth is *not* a
+measurement error from "ignoring productivity"; it is the central
+economic phenomenon of the period — productivity gains accrued to capital
+(asset owners), not to wage-earners. Deflating by productivity would
+erase exactly that finding.
+
+### What the commitment implies for future PRs
+
+Any proposal that would:
+
+- Add a productivity term to N_Time
+- Switch AHETPI to TFP-adjusted ULC
+- Introduce a "real wage" deflator that absorbs the capital-labor share
+- Add an automation-adjustment factor to any numéraire
+
+must be evaluated against the perspective commitment first. If the
+proposal shifts the perspective from consumer-side to productive-capacity,
+it has two viable paths:
+
+1. **Replace AVE's framing entirely**, with explicit user sign-off,
+   updated documentation across CLAUDE.md / README.md / ARCHITECTURE.md,
+   and migration of every test that pins the existing semantics; **or**
+2. **Live as a separate diagnostic layer** alongside the four numéraires,
+   under its own module (e.g. `numeraires_productivity/`), not as an
+   in-place modification.
+
+The four numéraires are not an arbitrary collection of macroeconomic
+indicators — they are four facets of a single, deliberately chosen
+viewpoint. Maintaining that viewpoint is load-bearing methodology.
+
+### What is in scope under the perspective
+
+Within the consumer-side commitment, several implementation details
+remain genuinely open:
+
+- **AHETPI vs. AHE-total vs. ECEC.** AHETPI was chosen to minimize
+  contamination from bonus / option pollution at the upper deciles
+  (production / nonsupervisory wages are the most "labor-power-like"
+  measure available in FRED ALFRED). AHE-total or ECEC would also be
+  defensible within the consumer-side perspective; the choice is
+  documented but not theorem-forced.
+- **Geographic scope.** AHETPI is US-only. Globally listed assets
+  technically should be deflated by a global wage basket. AVE accepts the
+  US-centric basis as a practical compromise — FRED ALFRED has long,
+  vintage-aware US data; international wage equivalents are sparser,
+  later-starting, and revision-unsafe.
+- **Production / nonsupervisory subset.** Excludes ~17 % of the US
+  workforce (managers, executives). Defensible because their compensation
+  is more bonus- and option-heavy and less labor-power-like — but worth
+  knowing. Switching to total private-sector earnings would be a
+  perspective-preserving change.
+
+These are **implementation** questions; the **perspective** is fixed.
+
+### Cross-references
+
+- [`KNOWN_LIMITATIONS.md`](KNOWN_LIMITATIONS.md) **L-15** — the
+  consumer-facing summary of the same commitment.
+- [`numeraires/time.py`](src/rollender_stein/numeraires/time.py) — the
+  AHETPI implementation.
+- [`numeraires/liquidity.py`](src/rollender_stein/numeraires/liquidity.py)
+  module docstring — the parallel argument for excluding PBOC (REWORKED
+  ID 9.M-12), which is itself an instance of perspective discipline:
+  "Global Fiat Ocean" would have been a productive-capacity-style framing,
+  "G3 Systemic Liquidity" is the consumer-side honest version.
+
+---
+
 ## How this list was built
 
 Each finding was checked against the live tree at `HEAD` via `grep` on the

@@ -244,6 +244,39 @@ Yahoo symbols only, so the case is largely hypothetical. ID 14.2 WON'T
 FIX — strict regex would risk breaking legitimate symbols like
 `BRK-B` or `BTC-USD`.
 
+## L-15 — N_Time captures wage-earner purchasing power, not labor productivity
+
+`N_Time` deflates by AHETPI (US production / nonsupervisory hourly
+earnings). The series captures **nominal hourly wages** for that subset
+of workers — it does **not** include adjustments for labor productivity,
+automation / robotics displacement, total factor productivity, or shifts
+in the capital-labor share.
+
+**Why this stays:** the omission is consistent with the AVE's broader
+**consumer-side perspective** — all four numéraires measure what the
+modal consumer / wage-earner / investor could buy with the asset's value
+(hours of own labor, MWh of energy, share of G3 broad money, ounces of
+gold). Robotics, software, and capital substitution belong to the *thing
+being valued* (the asset's productive capacity), not to the *valuer's
+measure*. When a robot makes the iPhone, the human still pays for it
+with their salary; the robot is priced into Apple's market cap, not into
+AHETPI.
+
+**The corollary that matters:** the divergence between an asset's
+N_Time-deflated trajectory and the same asset's N_Liq- or N_Gold-deflated
+trajectory is *precisely* the visualization of the labor-vs-capital
+share shift over the last 25 years. Deflating by productivity-adjusted
+wages (ULC, output / hour, TFP-adjusted) would normalize that divergence
+away — destroying exactly the story AVE is built to surface.
+
+**If you want productivity-adjusted real returns:** N_Time is not the
+right deflator — fork the diagnostic with output-per-hour or TFP-adjusted
+ULC and document it as a separate layer. Do not modify `N_Time` in place.
+
+See [`AUDIT_DECISIONS.md`](AUDIT_DECISIONS.md) **§7 Perspective
+Commitment** for the full formalization, including why this is treated
+as load-bearing methodology rather than a data-source choice.
+
 ---
 
 ## Classification
@@ -264,3 +297,4 @@ FIX — strict regex would risk breaking legitimate symbols like
 | L-12 | Operations | Local cron + GitHub Actions code gate | Paid persistent CI runner |
 | L-13 | Operations | RunResult exposes per-step status | Production monitoring layer |
 | L-14 | UX | Cosmetic only — no security risk | Stricter regex |
+| L-15 | Methodology / scope | Load-bearing perspective commitment (§7) | Out of scope by design |
