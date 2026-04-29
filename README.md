@@ -76,14 +76,35 @@ via the loaders in `rollender_stein.io.*`. CLAUDE.md has the runbooks.
 ## Layout
 
 - [`src/rollender_stein/`](src/rollender_stein/) — package source (~22 modules)
-- [`tests/`](tests/) — pytest tests (~182 tests, all green)
+- [`tests/`](tests/) — pytest tests (199 tests, all green)
 - `notebooks/` — research notebooks (gitignored output, structure tracked)
 - `data/` — local data cache (gitignored: `ave.duckdb`, `derived/`, `dashboard_*.html`)
 
+## Maintainer documentation
+
+The codebase carries five top-level documents for contributors and reviewers:
+
+- [`ARCHITECTURE.md`](ARCHITECTURE.md) — pipeline layers, data flow, F_t-measurability table
+- [`INVARIANTS.md`](INVARIANTS.md) — what the system guarantees, with test-name pinning
+- [`KNOWN_LIMITATIONS.md`](KNOWN_LIMITATIONS.md) — what it deliberately doesn't, with audit-ID rationale
+- [`CHANGELOG.md`](CHANGELOG.md) — chronological patch / feature history
+- [`CLAUDE.md`](CLAUDE.md) — methodological depth and runbooks
+- [`AUDIT_DECISIONS.md`](AUDIT_DECISIONS.md) — per-finding decision log
+  (DONE / REWORKED / WON'T FIX) for the audit baseline `af3956a`
+
+A pull request that changes an invariant must update `INVARIANTS.md`,
+the cited tests, and link to the rationale in `AUDIT_DECISIONS.md` or
+`CLAUDE.md`. A PR that closes a known limitation is a **feature PR**
+with its own justification, not a drive-by fix.
+
 ## Status
 
-- **Production-deployed:** no. There is no CI, no SLA, no monitoring.
-- **Research-ready:** yes. 182 tests, mypy strict, ruff clean.
+- **Production-deployed:** no. CI runs the three-tool gate (pytest + mypy
+  --strict + ruff) on every push to `main` and every PR via
+  [`.github/workflows/ci.yml`](.github/workflows/ci.yml); there is no
+  SLA, no monitoring, no scheduled refresh — see
+  [`KNOWN_LIMITATIONS.md`](KNOWN_LIMITATIONS.md) L-12 / L-13.
+- **Research-ready:** yes. 199 tests, mypy strict, ruff clean.
 - **Spec-compliant:** mostly — Phase 4's Kalman narrative was empirically demoted to a Phase 4.5 diagnostic during the audit-fix campaign. CLAUDE.md "Spec deviations" enumerates the deliberate departures.
 
 ## License
