@@ -5,12 +5,27 @@ read it before touching the codebase.
 
 ## What this project is
 
-The **Absolute Valuation Engine (AVE)** — a Python toolkit that measures asset
-prices in absolute terms by deflating against four numéraires (Time, Liquidity,
-Energy, Gold) anchored at a Genesis Timestamp `T0 = 2000-01-03`. The output is
-a 3D "phase-space" visualization showing each asset's trajectory through real
-purchasing-power dimensions, separating genuine wealth-generation from fiat
-illusion.
+This repo implements the **URTRIF v3.0** framework (Unified Real Total
+Return Index Framework) and generalizes it to a multi-numéraire
+architecture. The canonical spec lives in [`URTRIF.md`](URTRIF.md);
+the original PDF is at [`docs/URTRIF_v3.0.pdf`](docs/URTRIF_v3.0.pdf).
+
+URTRIF v3.0 transforms each raw price series into a single
+real-total-return index `I_real` against one CPI deflator. The repo's
+**Absolute Valuation Engine (AVE)** applies the same mathematical core
+to **four parallel deflators** at once — Time (AHETPI hourly wages),
+Energy (Brent → MWh), Liquidity (G3 broad money: US M2 + EZ M3·EURUSD +
+JP M3/USDJPY), and Gold (raw GC=F) — anchored at the Genesis Timestamp
+`T0 = 2000-01-03`. The output is a 3D phase-space visualization where
+each asset's trajectory reveals its real performance across multiple
+purchasing-power dimensions; the *divergence between axes* is the
+forensic information.
+
+Mathematically: `Asset_in_X(t) = nominal_USD(t) / N_X(t) · 100` for
+X ∈ {Time, Liquidity, Gold, Energy}. This is URTRIF's `I_real(t)`
+written in pointwise rather than cumulative-log form, with N_X playing
+the role of URTRIF's CPI deflator. See [`URTRIF.md`](URTRIF.md) §6 for
+the full algebraic bridge.
 
 Repository: `RvL13Capital/Rollender-Stein` on GitHub. Local working tree:
 `/Users/vonlinck/Desktop/Sympathy for the Devil/`.
@@ -18,7 +33,10 @@ Repository: `RvL13Capital/Rollender-Stein` on GitHub. Local working tree:
 The user originally provided a 7-phase forensic engineering spec (saved in
 session memory as `project_AVE_spec.md`). Phase 4's Kalman methodology was
 empirically demoted to a diagnostic during the audit-fix campaign — see
-"Spec deviations" below.
+"Spec deviations" below. URTRIF v3.0 was adopted in May 2026 as the
+canonical specification document; the existing AVE architecture was
+re-positioned as URTRIF's multi-numéraire generalization rather than
+reimplemented.
 
 ## Build / test commands
 

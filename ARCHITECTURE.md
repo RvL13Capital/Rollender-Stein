@@ -1,11 +1,19 @@
 # Architecture
 
-The **Absolute Valuation Engine (AVE)** expresses any asset's price not in
-fiat USD but as a vector of ratios against four independent numéraires
-("absolute rulers"), all anchored at the Genesis Timestamp
-**`T0 = 2000-01-03`** (first NYSE trading day of the millennium).
+This document describes how the runtime realizes the **URTRIF v3.0**
+specification ([`URTRIF.md`](URTRIF.md)) and generalizes it to four
+parallel deflators. URTRIF defines `I_real(t) = I_base(t) · C_t0/C_t`
+for one CPI-deflator `C`; this implementation produces four such indices
+in parallel — one per **numéraire** ("absolute ruler") — all anchored at
+the Genesis Timestamp **`T0 = 2000-01-03`** (first NYSE trading day of
+the millennium).
 
-This document describes the runtime layers and the data flow between them.
+The mapping in one line: AVE's `Asset_in_X(t) = nominal_USD(t) / N_X(t) ·
+100` is URTRIF's `I_real(t)` written pointwise rather than via
+cumulative log-returns, with `N_X(t) = C_X(t) / C_X(t_0) · 100` for each
+of the four deflators X ∈ {Time, Liquidity, Energy, Gold}. See
+[`URTRIF.md`](URTRIF.md) §6 for the full algebraic bridge.
+
 For methodological depth see [`CLAUDE.md`](CLAUDE.md); for per-finding
 decision rationale (DONE / REWORKED / WON'T FIX) see
 [`AUDIT_DECISIONS.md`](AUDIT_DECISIONS.md); for what the system guarantees
@@ -310,8 +318,51 @@ documented 8-month T0 gap** because GC=F starts only on 2000-08-30.
 The gap surfaces via a `RuntimeWarning` on every `build_division_array`
 call (Patch 04). See KNOWN_LIMITATIONS L-2.
 
+## How the layers realize URTRIF v3.0
+
+URTRIF v3.0 specifies three sequential operations and their numerical
+discipline ([`URTRIF.md`](URTRIF.md) §2 + §3). The mapping onto AVE
+layers:
+
+| URTRIF step | Where in AVE | Difference / extension |
+|---|---|---|
+| **1. Corporate actions** (splits + dividends, day-exact) | `valuation.py` reads `prefer_adjusted=True` (yfinance `adj_close`), which already incorporates splits + dividend-reinvestment retroactively | URTRIF's day-of-split rule is more reproducible across re-ingests; AVE accepts the trade-off and documents it as KNOWN_LIMITATIONS L-6 |
+| **2. FX conversion** (into base, exact cross term) | Implicit in `N_Liq` (G3 Ocean USD-equivalent uses EURUSD / USDJPY) | AVE only deflates USD-denominated assets; non-USD listings have no clean explicit FX axis. Candidate future addition |
+| **3. Inflation deflation** (CPI, repainting-free) | Layer 4 numéraire division: `Asset_in_X = nominal_USD / N_X · 100` for each X | AVE replaces URTRIF's single CPI deflator with **four** parallel deflators (Time, Energy, Liquidity, Gold), each producing one of the four `Asset_in_X` axes |
+
+URTRIF's engineering disciplines map onto AVE infrastructure:
+
+| URTRIF property | AVE realization |
+|---|---|
+| **Gap Trap Fix** (`ffill()` on close + FX before shift) | LOCF via `pd.merge_asof(direction='backward', on='release_date')` in `locf.py`; asset-side `closes.reindex(base_idx, method='ffill')` in `valuation.py` |
+| **Self-Anchoring** (C_t0 from first valid CPI value) | `build_n_gold` falls back to first valid date when T0 is uncovered; warned via `RuntimeWarning` in Patch 04 |
+| **Numerical stability** (log + cumsum + exp instead of cumprod) | n/a — AVE doesn't compound returns; pointwise division at each `t` avoids drift trivially |
+| **No look-ahead** (`merge_asof(direction='backward')`) | Bitemporal store enforces `release_date >= reference_date` at schema level (Patch 01); ALFRED `output_type=4` for vintage-aware deflators (Patch 02) |
+
+Where AVE goes **beyond** what URTRIF specifies:
+
+1. **First-release vintage data** via FRED ALFRED `output_type=4` —
+   URTRIF's spec is silent on whether the deflator is release-dated or
+   reference-dated; AVE makes it a schema invariant.
+2. **Per-series publication-lag table** (`PUBLICATION_LAG_BD`) — corrects
+   live-endpoint FRED series to their de-facto publication dates (Patch 02).
+3. **Splice with growth rates** when level series stop publishing (e.g.
+   EZ/JP M3 levels in 2023-11) — `extend_levels_with_growth`.
+4. **Multi-numéraire output** — four parallel `Asset_in_X` axes form a
+   3D phase-space trajectory (the fourth axis enters the visualization
+   via marker color); the divergence between axes is the unit of analysis.
+
+Where AVE **does not match** URTRIF and the gap is documented:
+
+- Day-of-split anchoring → KNOWN_LIMITATIONS L-6 (yfinance retroactive
+  adjustment); URTRIF would be more reproducible.
+- Explicit FX axis for non-USD assets → no current AVE layer; URTRIF
+  treats this as a first-class concern.
+
 ## Reference docs
 
+- [`URTRIF.md`](URTRIF.md) — **canonical specification** (URTRIF v3.0)
+- [`docs/URTRIF_v3.0.pdf`](docs/URTRIF_v3.0.pdf) — original specification PDF
 - [`README.md`](README.md) — quickstart and forensic principles
 - [`CLAUDE.md`](CLAUDE.md) — methodological depth and runbooks
 - [`INVARIANTS.md`](INVARIANTS.md) — what the system guarantees

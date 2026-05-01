@@ -1,15 +1,25 @@
 # Rollender-Stein
 
-The **Absolute Valuation Engine (AVE)** — a Python toolkit that measures
-asset prices in real, T0-anchored purchasing power by deflating against
-four independent numéraires (Time, Liquidity, Energy, Gold) anchored at
-the Genesis Timestamp `T0 = 2000-01-03`. The output is a 3D phase-space
-trajectory that separates genuine wealth-generation from fiat illusion.
+This repository implements the **URTRIF v3.0** framework
+([Unified Real Total Return Index Framework](URTRIF.md);
+PDF: [`docs/URTRIF_v3.0.pdf`](docs/URTRIF_v3.0.pdf)) and generalizes it
+to a multi-numéraire architecture under the name **Absolute Valuation
+Engine (AVE)**.
+
+URTRIF v3.0 transforms each raw price series into a single real-total-
+return index `I_real` against one deflator (CPI). AVE applies the same
+mathematical core to **four orthogonal-ish deflators** at once — Time
+(hourly wages), Energy (Brent → MWh), Liquidity (G3 broad money), and
+Gold — anchored at `T0 = 2000-01-03`. The four parallel indices form a
+3D phase-space trajectory whose **divergence between axes** is the unit
+of analysis: where labor outpaces money, where energy costs swamp wage
+growth, where monetary expansion shows up before gold reacts.
 
 This is a **forensic measurement instrument**, not a trading system. See
-[CLAUDE.md](CLAUDE.md) for the methodological details and
-[AUDIT_DECISIONS.md](AUDIT_DECISIONS.md) for the per-finding resolution
-log against the formal audit.
+[`URTRIF.md`](URTRIF.md) for the canonical spec and the bridge to AVE,
+[`CLAUDE.md`](CLAUDE.md) for methodological depth, and
+[`AUDIT_DECISIONS.md`](AUDIT_DECISIONS.md) for the per-finding resolution
+log.
 
 ## What you get
 
@@ -82,8 +92,11 @@ via the loaders in `rollender_stein.io.*`. CLAUDE.md has the runbooks.
 
 ## Maintainer documentation
 
-The codebase carries five top-level documents for contributors and reviewers:
+The codebase carries seven first-class documents, each with a distinct role:
 
+- [`URTRIF.md`](URTRIF.md) — **canonical specification** (URTRIF v3.0)
+  with markdown transcript, mathematical core, and bridge to AVE
+- [`docs/URTRIF_v3.0.pdf`](docs/URTRIF_v3.0.pdf) — original specification PDF
 - [`ARCHITECTURE.md`](ARCHITECTURE.md) — pipeline layers, data flow, F_t-measurability table
 - [`INVARIANTS.md`](INVARIANTS.md) — what the system guarantees, with test-name pinning
 - [`KNOWN_LIMITATIONS.md`](KNOWN_LIMITATIONS.md) — what it deliberately doesn't, with audit-ID rationale

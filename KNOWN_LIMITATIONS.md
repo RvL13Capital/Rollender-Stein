@@ -124,6 +124,15 @@ your own splits/dividends overlay against the vintage you care about.
 The market-cap layer already does this — `marketcap.build_market_cap`
 multiplies raw close by split-adjusted shares.
 
+**Spec divergence from URTRIF v3.0:** [`URTRIF.md`](URTRIF.md) §3.1
+defines the day-of-split rule `r_local = (P_t + D_t) / (P_{t-1} / S_t) − 1`,
+which scales the **previous** price by the split factor on split day and
+leaves the historical price record raw. That is more reproducible across
+re-ingests than yfinance's retroactive `adj_close`. Porting the URTRIF
+day-of-split logic from `marketcap.py::_cumulative_future_split_factor`
+into the per-share valuation path would close this divergence —
+candidate future improvement, see [`URTRIF.md`](URTRIF.md) §6.4.
+
 ## L-7 — `source` is not in the `macro_release` PK
 
 PK is `(series_id, reference_date, release_date)`; the `source` field
@@ -277,6 +286,35 @@ See [`AUDIT_DECISIONS.md`](AUDIT_DECISIONS.md) **§7 Perspective
 Commitment** for the full formalization, including why this is treated
 as load-bearing methodology rather than a data-source choice.
 
+## L-16 — Non-USD-denominated assets have no explicit FX-conversion path
+
+The current AVE pipeline assumes USD-denominated input prices. yfinance
+returns DAX-listed, LSE-listed, or TSX-listed equities in their **local
+currency**, and the AVE division `Asset_in_X = nominal_USD / N_X · 100`
+silently treats the local-currency value as if it were USD. The four
+numéraires are USD-anchored (or USD-equivalent in N_Liq's case), so a
+EUR-priced asset divided by N_Time (USD-anchored AHETPI) produces a
+mathematically meaningless mix.
+
+**Why it stays:** the codebase ingests USD-listed tickers (US single
+stocks, US ETFs, US futures, BTC-USD, ETH-USD) by disciplinary choice.
+Listing-currency mismatches would be obvious to a careful user but the
+pipeline does not enforce or warn about them.
+
+**Spec divergence from URTRIF v3.0:** [`URTRIF.md`](URTRIF.md) §3.2
+treats FX as a first-class operation: `r_FX = F_t/F_{t-1} − 1`, combined
+with the local return via the exact log-cross-term. URTRIF therefore
+handles non-USD assets natively. AVE's only FX-aware layer is the
+G3-Ocean construction inside `N_Liq` (EURUSD and USDJPY conversions
+of EZ M3 and JP M3); there is no asset-side FX stage.
+
+**Closing the gap:** an explicit FX layer in `valuation.py` (e.g. a
+`fx_pair` parameter that pulls a daily FX series from `fx_close` table
+and applies the URTRIF cross-term before the numéraire division) would
+allow non-USD assets to participate. The bitemporal store already has
+the `fx_close` table for this; it just isn't wired through. Candidate
+future improvement; see [`URTRIF.md`](URTRIF.md) §6.4.
+
 ---
 
 ## Classification
@@ -298,3 +336,4 @@ as load-bearing methodology rather than a data-source choice.
 | L-13 | Operations | RunResult exposes per-step status | Production monitoring layer |
 | L-14 | UX | Cosmetic only — no security risk | Stricter regex |
 | L-15 | Methodology / scope | Load-bearing perspective commitment (§7) | Out of scope by design |
+| L-16 | Architecture / spec divergence | Disciplinary USD-only ingest | Wire `fx_close` through `valuation.py` (URTRIF §3.2 cross-term) |
